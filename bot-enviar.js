@@ -190,6 +190,8 @@ function detectarTipoLink(texto) {
 }
 
 // ================== SISTEMA DE TICKETS ==================
+const CATEGORIA_TICKETS_ID = "1441676871086641172";
+
 const TIPOS_TICKET = {
   reportar_usuario: {
     label: "Reportar usuario",
@@ -465,7 +467,6 @@ client.on("interactionCreate", async (interaction) => {
 
       await interaction.deferReply({ ephemeral: true });
 
-      const canalPanel = interaction.channel;
       const nombreCanal = `ticket-${interaction.user.username}`
         .toLowerCase()
         .replace(/[^a-z0-9-]/g, "")
@@ -474,7 +475,7 @@ client.on("interactionCreate", async (interaction) => {
       const canalTicket = await guild.channels.create({
         name: nombreCanal || `ticket-${interaction.user.id}`,
         type: ChannelType.GuildText,
-        parent: canalPanel.parentId || null,
+        parent: CATEGORIA_TICKETS_ID,
         topic: `ticket:${interaction.user.id}:${tipoId}`,
         permissionOverwrites: [
           {
@@ -491,8 +492,6 @@ client.on("interactionCreate", async (interaction) => {
           },
         ],
       });
-
-      await canalTicket.setPosition(canalPanel.rawPosition + 1).catch(() => {});
 
       const embedTicket = new EmbedBuilder()
         .setTitle(`${tipo.emoji} ${tipo.label}`)
