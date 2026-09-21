@@ -228,8 +228,6 @@ const ROL_SERVICIO_ID = "1441645993627095164";
 const CANAL_LOGS_SERVICIO_ID = ""; // opcional: pon aquí el ID de un canal de texto para registrar entradas/salidas. Déjalo vacío ("") si no quieres logs.
 const ARCHIVO_SERVICIOS = "./servicios_activos.json";
 
-const OPCIONES_HORAS = [1, 2, 3, 4, 6, 8, 12, 24];
-
 // key = `${guildId}:${userId}`
 const serviciosActivos = new Map();
 const timersServicio = new Map();
@@ -266,13 +264,13 @@ function programarFinServicio(key, msRestantes) {
   timersServicio.set(key, timer);
 }
 
-async function iniciarServicio(interaction, horas) {
+async function iniciarServicio(interaction, minutos) {
   const guildId = interaction.guild.id;
   const userId = interaction.user.id;
   const key = `${guildId}:${userId}`;
 
   const inicio = Date.now();
-  const fin = inicio + horas * 60 * 60 * 1000;
+  const fin = inicio + minutos * 60 * 1000;
 
   const member = await interaction.guild.members.fetch(userId).catch(() => null);
   if (!member) return null;
@@ -281,12 +279,12 @@ async function iniciarServicio(interaction, horas) {
     console.error("No se pudo agregar el rol de servicio:", e);
   });
 
-  const entrada = { guildId, userId, horas, inicio, fin };
+  const entrada = { guildId, userId, minutos, inicio, fin };
   serviciosActivos.set(key, entrada);
   guardarServicios();
   programarFinServicio(key, fin - inicio);
 
-  await logServicio(interaction.guild, `🟢 <@${userId}> **entró** a servicio por **${horas} hora(s)**. Termina <t:${Math.floor(fin / 1000)}:R>.`);
+  await logServicio(interaction.guild, `🟢 <@${userId}> **entró** a servicio por **${minutos} minuto(s)**. Termina <t:${Math.floor(fin / 1000)}:R>.`);
 
   return entrada;
 }
@@ -576,15 +574,22 @@ client.on("interactionCreate", async (interaction) => {
         }
 
         const embed = new EmbedBuilder()
-          .setTitle("🎫 Sistema de Tickets")
-          .setDescription(
-            "Selecciona abajo el tipo de ticket que quieres abrir y nuestro staff te atenderá lo antes posible.\n\n" +
-              Object.values(TIPOS_TICKET)
-                .map((t) => `${t.emoji} **${t.label}** — ${t.description}`)
-                .join("\n")
-          )
           .setColor(0xed4245)
-          .setFooter({ text: "Solo puedes tener un ticket abierto a la vez" });
+          .setTitle("🎫 Sistema de Tickets")
+          .setThumbnail(interaction.guild.iconURL({ size: 256 }) || null)
+          .setDescription(
+            "¿Necesitas ayuda? Elige una opción del menú de abajo y abre un ticket.\n" +
+              "Un miembro del staff te atenderá lo antes posible.\n\n" +
+              Object.values(TIPOS_TICKET)
+                .map((t) => `${t.emoji} **${t.label}**\n${t.description}`)
+                .join("\n\n") +
+              "\n\n📌 **Antes de abrir un ticket**\n" +
+              "• Solo puedes tener **un ticket abierto** a la vez.\n" +
+              "• Sé respetuoso con el staff.\n" +
+              "• No abras tickets falsos ni hagas spam."
+          )
+          .setFooter({ text: `${interaction.guild.name} • Soporte`, iconURL: interaction.guild.iconURL() || undefined })
+          .setTimestamp();
 
         const menu = new StringSelectMenuBuilder()
           .setCustomId("seleccionar_tipo_ticket")
@@ -746,23 +751,31 @@ client.on("interactionCreate", async (interaction) => {
         }
 
         const embed = new EmbedBuilder()
-          .setTitle("🕒 Sistema de Servicios")
-          .setDescription(
-            "Pulsa el botón de abajo para entrar a servicio y elegir cuántas horas vas a estar.\n\n" +
-              "Al terminar el tiempo, el rol se te quita automáticamente."
-          )
           .setColor(0x57f287)
-          .setFooter({ text: "Puedes salir antes de tiempo con el botón de 'Salir de servicio'" });
+          .setTitle(`🕒 Panel de Servicio — ${interaction.guild.name}`)
+          .setThumbnail(interaction.guild.iconURL({ size: 256 }) || null)
+          .setDescription(
+            `⏱️ Presiona **Entrar en Servicio** e indica cuántos minutos estarás de turno (entre 1 y 120).\n\n` +
+              `🔒 Mientras estés en servicio se te asignará el rol <@&${ROL_SERVICIO_ID}>.\n\n` +
+              `🔴 Presiona **Salir de Turno** en cualquier momento para finalizar tu servicio antes de que se acabe el tiempo.`
+          )
+          .setFooter({ text: `${interaction.guild.name} • Servicios`, iconURL: interaction.guild.iconURL() || undefined })
+          .setTimestamp();
 
-        const boton = new ActionRowBuilder().addComponents(
+        const botones = new ActionRowBuilder().addComponents(
           new ButtonBuilder()
             .setCustomId("entrar_servicio_btn")
-            .setLabel("Entrar a servicio")
+            .setLabel("Entrar en Servicio")
             .setEmoji("🟢")
-            .setStyle(ButtonStyle.Success)
+            .setStyle(ButtonStyle.Success),
+          new ButtonBuilder()
+            .setCustomId("salir_servicio_btn")
+            .setLabel("Salir de Turno")
+            .setEmoji("🔴")
+            .setStyle(ButtonStyle.Danger)
         );
 
-        await interaction.reply({ embeds: [embed], components: [boton] });
+        await interaction.reply({ embeds: [embed], components: [botones] });
       } catch (e) {
         console.error("Error en /panel-servicios:", e);
         if (interaction.isRepliable() && !interaction.replied) {
@@ -774,7 +787,7 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    // ---------- Botón: Entrar a servicio ----------
+    // ---------- Botón: Entrar en Servicio ----------
     if (interaction.isButton() && interaction.customId === "entrar_servicio_btn") {
       const key = `${interaction.guild.id}:${interaction.user.id}`;
       const entradaActiva = serviciosActivos.get(key);
@@ -787,30 +800,27 @@ client.on("interactionCreate", async (interaction) => {
         return;
       }
 
-      const menu = new StringSelectMenuBuilder()
-        .setCustomId("seleccionar_horas_servicio")
-        .setPlaceholder("¿Cuántas horas vas a estar en servicio?")
-        .addOptions(
-          OPCIONES_HORAS.map((h) => ({
-            label: `${h} hora${h > 1 ? "s" : ""}`,
-            value: String(h),
-          }))
-        );
+      const modal = new ModalBuilder()
+        .setCustomId("modal_entrar_servicio")
+        .setTitle("Entrar en Servicio");
 
-      const fila = new ActionRowBuilder().addComponents(menu);
+      const inputMinutos = new TextInputBuilder()
+        .setCustomId("input_minutos_servicio")
+        .setLabel("Minutos de turno (1-120)")
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder("Ej: 60")
+        .setRequired(true)
+        .setMaxLength(3);
 
-      await interaction.reply({
-        content: "Selecciona cuántas horas vas a estar en servicio:",
-        components: [fila],
-        ephemeral: true,
-      });
+      modal.addComponents(new ActionRowBuilder().addComponents(inputMinutos));
+
+      await interaction.showModal(modal);
       return;
     }
 
-    // ---------- Selección de horas de servicio ----------
-    if (interaction.isStringSelectMenu() && interaction.customId === "seleccionar_horas_servicio") {
+    // ---------- Modal: Entrar en Servicio enviado ----------
+    if (interaction.isModalSubmit() && interaction.customId === "modal_entrar_servicio") {
       try {
-        const horas = parseInt(interaction.values[0], 10);
         const key = `${interaction.guild.id}:${interaction.user.id}`;
 
         if (serviciosActivos.has(key)) {
@@ -818,9 +828,20 @@ client.on("interactionCreate", async (interaction) => {
           return;
         }
 
+        const texto = interaction.fields.getTextInputValue("input_minutos_servicio").trim();
+        const minutos = parseInt(texto, 10);
+
+        if (isNaN(minutos) || minutos < 1 || minutos > 120) {
+          await interaction.reply({
+            content: "❌ Escribe un número de minutos válido entre 1 y 120.",
+            ephemeral: true,
+          });
+          return;
+        }
+
         await interaction.deferReply({ ephemeral: true });
 
-        const entrada = await iniciarServicio(interaction, horas);
+        const entrada = await iniciarServicio(interaction, minutos);
         if (!entrada) {
           await interaction.editReply({ content: "❌ No pude asignarte el rol de servicio." });
           return;
@@ -829,7 +850,7 @@ client.on("interactionCreate", async (interaction) => {
         const embed = new EmbedBuilder()
           .setTitle("🟢 En servicio")
           .setDescription(
-            `Entraste a servicio por **${horas} hora${horas > 1 ? "s" : ""}**.\nTermina <t:${Math.floor(
+            `Entraste a servicio por **${minutos} minuto${minutos > 1 ? "s" : ""}**.\nTermina <t:${Math.floor(
               entrada.fin / 1000
             )}:F> (<t:${Math.floor(entrada.fin / 1000)}:R>).`
           )
@@ -838,7 +859,7 @@ client.on("interactionCreate", async (interaction) => {
         const botonSalir = new ActionRowBuilder().addComponents(
           new ButtonBuilder()
             .setCustomId("salir_servicio_btn")
-            .setLabel("Salir de servicio")
+            .setLabel("Salir de Turno")
             .setEmoji("🔴")
             .setStyle(ButtonStyle.Danger)
         );
@@ -848,12 +869,16 @@ client.on("interactionCreate", async (interaction) => {
         console.error("Error al iniciar servicio:", e);
         if (interaction.deferred) {
           await interaction.editReply({ content: `❌ No pude iniciar el servicio: ${e.message}` }).catch(() => {});
+        } else if (interaction.isRepliable()) {
+          await interaction
+            .reply({ content: `❌ No pude iniciar el servicio: ${e.message}`, ephemeral: true })
+            .catch(() => {});
         }
       }
       return;
     }
 
-    // ---------- Botón: Salir de servicio ----------
+    // ---------- Botón: Salir de Turno ----------
     if (interaction.isButton() && interaction.customId === "salir_servicio_btn") {
       const key = `${interaction.guild.id}:${interaction.user.id}`;
 
