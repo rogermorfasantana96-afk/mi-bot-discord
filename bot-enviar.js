@@ -191,6 +191,8 @@ function detectarTipoLink(texto) {
 }
 
 // ================== SISTEMA DE TICKETS ==================
+// ⚠️ Revisa que este ID sea el de una CATEGORÍA real de tu servidor
+// (clic derecho sobre la categoría -> Copiar ID, con el modo desarrollador activado)
 const CATEGORIA_TICKETS_ID = "1441676871086641172";
 
 const TIPOS_TICKET = {
@@ -221,6 +223,7 @@ function esCanalDeTicket(canal) {
 }
 
 // ================== SISTEMA DE SERVICIOS ==================
+// ⚠️ Revisa que este ID sea el de un ROL real de tu servidor
 const ROL_SERVICIO_ID = "1441645993627095164";
 const CANAL_LOGS_SERVICIO_ID = ""; // opcional: pon aquí el ID de un canal de texto para registrar entradas/salidas. Déjalo vacío ("") si no quieres logs.
 const ARCHIVO_SERVICIOS = "./servicios_activos.json";
@@ -551,85 +554,131 @@ client.on("interactionCreate", async (interaction) => {
 
     // ---------- /panel-tickets ----------
     if (interaction.isChatInputCommand() && interaction.commandName === "panel-tickets") {
-      const embed = new EmbedBuilder()
-        .setTitle("🎫 Sistema de Tickets")
-        .setDescription("Selecciona abajo el tipo de ticket que quieres abrir.")
-        .setColor(0xed4245);
+      try {
+        // Verificar que la categoría de tickets existe antes de publicar el panel
+        const categoria = await interaction.guild.channels.fetch(CATEGORIA_TICKETS_ID).catch(() => null);
+        if (!categoria || categoria.type !== ChannelType.GuildCategory) {
+          await interaction.reply({
+            content: `❌ No encuentro la categoría de tickets (ID: \`${CATEGORIA_TICKETS_ID}\`). Verifica el ID de \`CATEGORIA_TICKETS_ID\` en el código.`,
+            ephemeral: true,
+          });
+          return;
+        }
 
-      const menu = new StringSelectMenuBuilder()
-        .setCustomId("seleccionar_tipo_ticket")
-        .setPlaceholder("Elige una opción")
-        .addOptions(
-          Object.entries(TIPOS_TICKET).map(([id, t]) => ({
-            label: t.label,
-            description: t.description,
-            value: id,
-            emoji: t.emoji,
-          }))
-        );
+        // Verificar que el bot puede crear canales en esa categoría
+        const permisosBot = categoria.permissionsFor(interaction.guild.members.me);
+        if (!permisosBot || !permisosBot.has(PermissionFlagsBits.ManageChannels)) {
+          await interaction.reply({
+            content: "❌ No tengo permiso de 'Gestionar canales' en la categoría de tickets. Dame ese permiso e intenta de nuevo.",
+            ephemeral: true,
+          });
+          return;
+        }
 
-      const fila = new ActionRowBuilder().addComponents(menu);
+        const embed = new EmbedBuilder()
+          .setTitle("🎫 Sistema de Tickets")
+          .setDescription(
+            "Selecciona abajo el tipo de ticket que quieres abrir y nuestro staff te atenderá lo antes posible.\n\n" +
+              Object.values(TIPOS_TICKET)
+                .map((t) => `${t.emoji} **${t.label}** — ${t.description}`)
+                .join("\n")
+          )
+          .setColor(0xed4245)
+          .setFooter({ text: "Solo puedes tener un ticket abierto a la vez" });
 
-      await interaction.reply({ embeds: [embed], components: [fila] });
+        const menu = new StringSelectMenuBuilder()
+          .setCustomId("seleccionar_tipo_ticket")
+          .setPlaceholder("Elige una opción")
+          .addOptions(
+            Object.entries(TIPOS_TICKET).map(([id, t]) => ({
+              label: t.label,
+              description: t.description,
+              value: id,
+              emoji: t.emoji,
+            }))
+          );
+
+        const fila = new ActionRowBuilder().addComponents(menu);
+
+        await interaction.reply({ embeds: [embed], components: [fila] });
+      } catch (e) {
+        console.error("Error en /panel-tickets:", e);
+        if (interaction.isRepliable() && !interaction.replied) {
+          await interaction
+            .reply({ content: `❌ Error al publicar el panel de tickets: ${e.message}`, ephemeral: true })
+            .catch(() => {});
+        }
+      }
       return;
     }
 
     // ---------- Selección del tipo de ticket ----------
     if (interaction.isStringSelectMenu() && interaction.customId === "seleccionar_tipo_ticket") {
-      const tipoId = interaction.values[0];
-      const tipo = TIPOS_TICKET[tipoId];
-      const guild = interaction.guild;
+      try {
+        const tipoId = interaction.values[0];
+        const tipo = TIPOS_TICKET[tipoId];
+        const guild = interaction.guild;
 
-      const yaAbierto = guild.channels.cache.find(
-        (c) => esCanalDeTicket(c) && c.topic.includes(`ticket:${interaction.user.id}:`)
-      );
-      if (yaAbierto) {
-        await interaction.reply({
-          content: `⚠️ Ya tienes un ticket abierto: <#${yaAbierto.id}>`,
-          ephemeral: true,
+        const yaAbierto = guild.channels.cache.find(
+          (c) => esCanalDeTicket(c) && c.topic.includes(`ticket:${interaction.user.id}:`)
+        );
+        if (yaAbierto) {
+          await interaction.reply({
+            content: `⚠️ Ya tienes un ticket abierto: <#${yaAbierto.id}>`,
+            ephemeral: true,
+          });
+          return;
+        }
+
+        await interaction.deferReply({ ephemeral: true });
+
+        const nombreCanal = `ticket-${interaction.user.username}`
+          .toLowerCase()
+          .replace(/[^a-z0-9-]/g, "")
+          .slice(0, 90);
+
+        const canalTicket = await guild.channels.create({
+          name: nombreCanal || `ticket-${interaction.user.id}`,
+          type: ChannelType.GuildText,
+          parent: CATEGORIA_TICKETS_ID,
+          topic: `ticket:${interaction.user.id}:${tipoId}`,
+          permissionOverwrites: [
+            {
+              id: guild.roles.everyone.id,
+              deny: [PermissionFlagsBits.ViewChannel],
+            },
+            {
+              id: interaction.user.id,
+              allow: [
+                PermissionFlagsBits.ViewChannel,
+                PermissionFlagsBits.SendMessages,
+                PermissionFlagsBits.ReadMessageHistory,
+              ],
+            },
+          ],
         });
-        return;
+
+        const embedTicket = new EmbedBuilder()
+          .setTitle(`${tipo.emoji} ${tipo.label}`)
+          .setDescription(`${tipo.mensaje}\n\n<@${interaction.user.id}>`)
+          .setColor(0xed4245)
+          .setFooter({ text: "Usa /close para cerrar · /add @usuario para agregar a alguien" });
+
+        await canalTicket.send({ embeds: [embedTicket] });
+
+        await interaction.editReply({
+          content: `✅ Tu ticket fue creado: <#${canalTicket.id}>`,
+        });
+      } catch (e) {
+        console.error("Error al crear el ticket:", e);
+        if (interaction.deferred) {
+          await interaction.editReply({ content: `❌ No pude crear el ticket: ${e.message}` }).catch(() => {});
+        } else if (interaction.isRepliable()) {
+          await interaction
+            .reply({ content: `❌ No pude crear el ticket: ${e.message}`, ephemeral: true })
+            .catch(() => {});
+        }
       }
-
-      await interaction.deferReply({ ephemeral: true });
-
-      const nombreCanal = `ticket-${interaction.user.username}`
-        .toLowerCase()
-        .replace(/[^a-z0-9-]/g, "")
-        .slice(0, 90);
-
-      const canalTicket = await guild.channels.create({
-        name: nombreCanal || `ticket-${interaction.user.id}`,
-        type: ChannelType.GuildText,
-        parent: CATEGORIA_TICKETS_ID,
-        topic: `ticket:${interaction.user.id}:${tipoId}`,
-        permissionOverwrites: [
-          {
-            id: guild.roles.everyone.id,
-            deny: [PermissionFlagsBits.ViewChannel],
-          },
-          {
-            id: interaction.user.id,
-            allow: [
-              PermissionFlagsBits.ViewChannel,
-              PermissionFlagsBits.SendMessages,
-              PermissionFlagsBits.ReadMessageHistory,
-            ],
-          },
-        ],
-      });
-
-      const embedTicket = new EmbedBuilder()
-        .setTitle(`${tipo.emoji} ${tipo.label}`)
-        .setDescription(`${tipo.mensaje}\n\n<@${interaction.user.id}>`)
-        .setColor(0xed4245)
-        .setFooter({ text: "Usa /close para cerrar · /add @usuario para agregar a alguien" });
-
-      await canalTicket.send({ embeds: [embedTicket] });
-
-      await interaction.editReply({
-        content: `✅ Tu ticket fue creado: <#${canalTicket.id}>`,
-      });
       return;
     }
 
@@ -676,20 +725,52 @@ client.on("interactionCreate", async (interaction) => {
 
     // ---------- /panel-servicios ----------
     if (interaction.isChatInputCommand() && interaction.commandName === "panel-servicios") {
-      const embed = new EmbedBuilder()
-        .setTitle("🕒 Sistema de Servicios")
-        .setDescription("Pulsa el botón de abajo para entrar a servicio y elegir cuántas horas vas a estar.")
-        .setColor(0x57f287);
+      try {
+        // Verificar que el rol de servicio existe
+        const rolServicio = await interaction.guild.roles.fetch(ROL_SERVICIO_ID).catch(() => null);
+        if (!rolServicio) {
+          await interaction.reply({
+            content: `❌ No encuentro el rol de servicio (ID: \`${ROL_SERVICIO_ID}\`). Verifica el ID de \`ROL_SERVICIO_ID\` en el código.`,
+            ephemeral: true,
+          });
+          return;
+        }
 
-      const boton = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("entrar_servicio_btn")
-          .setLabel("Entrar a servicio")
-          .setEmoji("🟢")
-          .setStyle(ButtonStyle.Success)
-      );
+        // Verificar que el rol del bot está por encima del rol de servicio
+        if (rolServicio.position >= interaction.guild.members.me.roles.highest.position) {
+          await interaction.reply({
+            content: `❌ Mi rol está por debajo de "${rolServicio.name}" en la jerarquía. Sube mi rol por encima de ese rol en Ajustes del servidor → Roles.`,
+            ephemeral: true,
+          });
+          return;
+        }
 
-      await interaction.reply({ embeds: [embed], components: [boton] });
+        const embed = new EmbedBuilder()
+          .setTitle("🕒 Sistema de Servicios")
+          .setDescription(
+            "Pulsa el botón de abajo para entrar a servicio y elegir cuántas horas vas a estar.\n\n" +
+              "Al terminar el tiempo, el rol se te quita automáticamente."
+          )
+          .setColor(0x57f287)
+          .setFooter({ text: "Puedes salir antes de tiempo con el botón de 'Salir de servicio'" });
+
+        const boton = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId("entrar_servicio_btn")
+            .setLabel("Entrar a servicio")
+            .setEmoji("🟢")
+            .setStyle(ButtonStyle.Success)
+        );
+
+        await interaction.reply({ embeds: [embed], components: [boton] });
+      } catch (e) {
+        console.error("Error en /panel-servicios:", e);
+        if (interaction.isRepliable() && !interaction.replied) {
+          await interaction
+            .reply({ content: `❌ Error al publicar el panel de servicios: ${e.message}`, ephemeral: true })
+            .catch(() => {});
+        }
+      }
       return;
     }
 
@@ -728,40 +809,47 @@ client.on("interactionCreate", async (interaction) => {
 
     // ---------- Selección de horas de servicio ----------
     if (interaction.isStringSelectMenu() && interaction.customId === "seleccionar_horas_servicio") {
-      const horas = parseInt(interaction.values[0], 10);
-      const key = `${interaction.guild.id}:${interaction.user.id}`;
+      try {
+        const horas = parseInt(interaction.values[0], 10);
+        const key = `${interaction.guild.id}:${interaction.user.id}`;
 
-      if (serviciosActivos.has(key)) {
-        await interaction.reply({ content: "⚠️ Ya estás en servicio.", ephemeral: true });
-        return;
+        if (serviciosActivos.has(key)) {
+          await interaction.reply({ content: "⚠️ Ya estás en servicio.", ephemeral: true });
+          return;
+        }
+
+        await interaction.deferReply({ ephemeral: true });
+
+        const entrada = await iniciarServicio(interaction, horas);
+        if (!entrada) {
+          await interaction.editReply({ content: "❌ No pude asignarte el rol de servicio." });
+          return;
+        }
+
+        const embed = new EmbedBuilder()
+          .setTitle("🟢 En servicio")
+          .setDescription(
+            `Entraste a servicio por **${horas} hora${horas > 1 ? "s" : ""}**.\nTermina <t:${Math.floor(
+              entrada.fin / 1000
+            )}:F> (<t:${Math.floor(entrada.fin / 1000)}:R>).`
+          )
+          .setColor(0x57f287);
+
+        const botonSalir = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId("salir_servicio_btn")
+            .setLabel("Salir de servicio")
+            .setEmoji("🔴")
+            .setStyle(ButtonStyle.Danger)
+        );
+
+        await interaction.editReply({ embeds: [embed], components: [botonSalir] });
+      } catch (e) {
+        console.error("Error al iniciar servicio:", e);
+        if (interaction.deferred) {
+          await interaction.editReply({ content: `❌ No pude iniciar el servicio: ${e.message}` }).catch(() => {});
+        }
       }
-
-      await interaction.deferReply({ ephemeral: true });
-
-      const entrada = await iniciarServicio(interaction, horas);
-      if (!entrada) {
-        await interaction.editReply({ content: "❌ No pude asignarte el rol de servicio." });
-        return;
-      }
-
-      const embed = new EmbedBuilder()
-        .setTitle("🟢 En servicio")
-        .setDescription(
-          `Entraste a servicio por **${horas} hora${horas > 1 ? "s" : ""}**.\nTermina <t:${Math.floor(
-            entrada.fin / 1000
-          )}:F> (<t:${Math.floor(entrada.fin / 1000)}:R>).`
-        )
-        .setColor(0x57f287);
-
-      const botonSalir = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("salir_servicio_btn")
-          .setLabel("Salir de servicio")
-          .setEmoji("🔴")
-          .setStyle(ButtonStyle.Danger)
-      );
-
-      await interaction.editReply({ embeds: [embed], components: [botonSalir] });
       return;
     }
 
