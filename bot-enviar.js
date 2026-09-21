@@ -80,7 +80,7 @@ const PALABRAS_PROHIBIDAS = [
   "idiota",
 ];
 
-const DURACION_SUSPENSION_MS = 60 * 60 * 1000; // 1 hora
+const DURACION_SUSPENSION_MS = 60 * 60 * 1000;
 const historialOfensas = new Map();
 
 function contieneMalaPalabra(texto) {
@@ -190,8 +190,6 @@ function detectarTipoLink(texto) {
 }
 
 // ================== SISTEMA DE TICKETS ==================
-const CATEGORIA_TICKETS_NOMBRE = "🎫 Tickets";
-
 const TIPOS_TICKET = {
   reportar_usuario: {
     label: "Reportar usuario",
@@ -214,19 +212,6 @@ const TIPOS_TICKET = {
       "Indica en qué sorteo ganaste y adjunta una prueba (captura del anuncio de ganador) para validar tu premio.",
   },
 };
-
-async function obtenerOCrearCategoriaTickets(guild) {
-  let categoria = guild.channels.cache.find(
-    (c) => c.type === ChannelType.GuildCategory && c.name === CATEGORIA_TICKETS_NOMBRE
-  );
-  if (!categoria) {
-    categoria = await guild.channels.create({
-      name: CATEGORIA_TICKETS_NOMBRE,
-      type: ChannelType.GuildCategory,
-    });
-  }
-  return categoria;
-}
 
 function esCanalDeTicket(canal) {
   return !!canal.topic && canal.topic.startsWith("ticket:");
@@ -480,7 +465,7 @@ client.on("interactionCreate", async (interaction) => {
 
       await interaction.deferReply({ ephemeral: true });
 
-      const categoria = await obtenerOCrearCategoriaTickets(guild);
+      const canalPanel = interaction.channel;
       const nombreCanal = `ticket-${interaction.user.username}`
         .toLowerCase()
         .replace(/[^a-z0-9-]/g, "")
@@ -489,7 +474,7 @@ client.on("interactionCreate", async (interaction) => {
       const canalTicket = await guild.channels.create({
         name: nombreCanal || `ticket-${interaction.user.id}`,
         type: ChannelType.GuildText,
-        parent: categoria.id,
+        parent: canalPanel.parentId || null,
         topic: `ticket:${interaction.user.id}:${tipoId}`,
         permissionOverwrites: [
           {
@@ -506,6 +491,8 @@ client.on("interactionCreate", async (interaction) => {
           },
         ],
       });
+
+      await canalTicket.setPosition(canalPanel.rawPosition + 1).catch(() => {});
 
       const embedTicket = new EmbedBuilder()
         .setTitle(`${tipo.emoji} ${tipo.label}`)
