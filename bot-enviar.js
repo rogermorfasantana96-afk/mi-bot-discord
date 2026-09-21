@@ -13,6 +13,7 @@ const {
   TextInputStyle,
   EmbedBuilder,
   ChannelSelectMenuBuilder,
+  StringSelectMenuBuilder,
   ChannelType,
   PermissionFlagsBits,
 } = require("discord.js");
@@ -80,13 +81,13 @@ const PALABRAS_PROHIBIDAS = [
 ];
 
 const DURACION_SUSPENSION_MS = 60 * 60 * 1000; // 1 hora
-const historialOfensas = new Map(); // userId -> cantidad de veces suspendido
+const historialOfensas = new Map();
 
 function contieneMalaPalabra(texto) {
   const limpio = texto
     .toLowerCase()
     .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, ""); // quita acentos
+    .replace(/[\u0300-\u036f]/g, "");
   return PALABRAS_PROHIBIDAS.some((palabra) => limpio.includes(palabra));
 }
 
@@ -94,7 +95,6 @@ client.on("messageCreate", async (mensaje) => {
   if (mensaje.author.bot) return;
   if (!mensaje.guild) return;
 
-  // ---------- Malas palabras: borra y suspende ----------
   if (contieneMalaPalabra(mensaje.content)) {
     try {
       await mensaje.delete().catch(() => {});
@@ -106,7 +106,6 @@ client.on("messageCreate", async (mensaje) => {
       const vecesNueva = vecesAnterior + 1;
       historialOfensas.set(member.id, vecesNueva);
 
-      // ---------- 3ra vez o más: BANEAR ----------
       if (vecesNueva >= 3) {
         if (member.bannable) {
           const dmBan = new EmbedBuilder()
@@ -141,7 +140,6 @@ client.on("messageCreate", async (mensaje) => {
 
       await mensaje.channel.send({ embeds: [aviso] });
 
-      // Si ya es la segunda vez, avisar por privado que la próxima es baneo
       if (vecesNueva === 2) {
         const dm = new EmbedBuilder()
           .setTitle("⚠️ Advertencia")
@@ -158,7 +156,6 @@ client.on("messageCreate", async (mensaje) => {
     return;
   }
 
-  // ---------- Links: solo avisar qué tipo es ----------
   const tipoLink = detectarTipoLink(mensaje.content);
   if (tipoLink) {
     mensaje.reply(`🔗 Ese link es de: **${tipoLink}**`).catch(() => {});
@@ -192,6 +189,49 @@ function detectarTipoLink(texto) {
   }
 }
 
+// ================== SISTEMA DE TICKETS ==================
+const CATEGORIA_TICKETS_NOMBRE = "🎫 Tickets";
+
+const TIPOS_TICKET = {
+  reportar_usuario: {
+    label: "Reportar usuario",
+    emoji: "🚨",
+    description: "Reporta a un usuario que rompe las reglas",
+    mensaje:
+      "Describe qué usuario quieres reportar y por qué. Si tienes pruebas (capturas, mensajes), adjúntalas aquí.",
+  },
+  dudas: {
+    label: "Dudas",
+    emoji: "❓",
+    description: "Resuelve tus dudas con el staff",
+    mensaje: "Cuéntanos tu duda con el mayor detalle posible y el staff te responderá pronto.",
+  },
+  sorteo: {
+    label: "Reclamar un sorteo",
+    emoji: "🎁",
+    description: "Reclama un premio que ganaste en un sorteo",
+    mensaje:
+      "Indica en qué sorteo ganaste y adjunta una prueba (captura del anuncio de ganador) para validar tu premio.",
+  },
+};
+
+async function obtenerOCrearCategoriaTickets(guild) {
+  let categoria = guild.channels.cache.find(
+    (c) => c.type === ChannelType.GuildCategory && c.name === CATEGORIA_TICKETS_NOMBRE
+  );
+  if (!categoria) {
+    categoria = await guild.channels.create({
+      name: CATEGORIA_TICKETS_NOMBRE,
+      type: ChannelType.GuildCategory,
+    });
+  }
+  return categoria;
+}
+
+function esCanalDeTicket(canal) {
+  return !!canal.topic && canal.topic.startsWith("ticket:");
+}
+
 // ================== COMANDOS SLASH ==================
 const comandos = [
   new SlashCommandBuilder()
@@ -215,6 +255,21 @@ const comandos = [
     .setName("reiniciar-canal")
     .setDescription("Borra TODOS los mensajes del canal actual clonándolo de nuevo")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
+
+  new SlashCommandBuilder()
+    .setName("panel-tickets")
+    .setDescription("Publica el panel para abrir tickets"),
+
+  new SlashCommandBuilder()
+    .setName("close")
+    .setDescription("Cierra el ticket actual"),
+
+  new SlashCommandBuilder()
+    .setName("add")
+    .setDescription("Agrega a alguien a este ticket")
+    .addUserOption((op) =>
+      op.setName("usuario").setDescription("Usuario a agregar").setRequired(true)
+    ),
 ].map((c) => c.toJSON());
 
 async function registrarComandos() {
@@ -378,6 +433,132 @@ client.on("interactionCreate", async (interaction) => {
       } catch (e) {
         console.error(e);
       }
+      return;
+    }
+
+    // ---------- /panel-tickets ----------
+    if (interaction.isChatInputCommand() && interaction.commandName === "panel-tickets") {
+      const embed = new EmbedBuilder()
+        .setTitle("🎫 Sistema de Tickets")
+        .setDescription("Selecciona abajo el tipo de ticket que quieres abrir.")
+        .setColor(0xed4245);
+
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId("seleccionar_tipo_ticket")
+        .setPlaceholder("Elige una opción")
+        .addOptions(
+          Object.entries(TIPOS_TICKET).map(([id, t]) => ({
+            label: t.label,
+            description: t.description,
+            value: id,
+            emoji: t.emoji,
+          }))
+        );
+
+      const fila = new ActionRowBuilder().addComponents(menu);
+
+      await interaction.reply({ embeds: [embed], components: [fila] });
+      return;
+    }
+
+    // ---------- Selección del tipo de ticket ----------
+    if (interaction.isStringSelectMenu() && interaction.customId === "seleccionar_tipo_ticket") {
+      const tipoId = interaction.values[0];
+      const tipo = TIPOS_TICKET[tipoId];
+      const guild = interaction.guild;
+
+      const yaAbierto = guild.channels.cache.find(
+        (c) => esCanalDeTicket(c) && c.topic.includes(`ticket:${interaction.user.id}:`)
+      );
+      if (yaAbierto) {
+        await interaction.reply({
+          content: `⚠️ Ya tienes un ticket abierto: <#${yaAbierto.id}>`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      await interaction.deferReply({ ephemeral: true });
+
+      const categoria = await obtenerOCrearCategoriaTickets(guild);
+      const nombreCanal = `ticket-${interaction.user.username}`
+        .toLowerCase()
+        .replace(/[^a-z0-9-]/g, "")
+        .slice(0, 90);
+
+      const canalTicket = await guild.channels.create({
+        name: nombreCanal || `ticket-${interaction.user.id}`,
+        type: ChannelType.GuildText,
+        parent: categoria.id,
+        topic: `ticket:${interaction.user.id}:${tipoId}`,
+        permissionOverwrites: [
+          {
+            id: guild.roles.everyone.id,
+            deny: [PermissionFlagsBits.ViewChannel],
+          },
+          {
+            id: interaction.user.id,
+            allow: [
+              PermissionFlagsBits.ViewChannel,
+              PermissionFlagsBits.SendMessages,
+              PermissionFlagsBits.ReadMessageHistory,
+            ],
+          },
+        ],
+      });
+
+      const embedTicket = new EmbedBuilder()
+        .setTitle(`${tipo.emoji} ${tipo.label}`)
+        .setDescription(`${tipo.mensaje}\n\n<@${interaction.user.id}>`)
+        .setColor(0xed4245)
+        .setFooter({ text: "Usa /close para cerrar · /add @usuario para agregar a alguien" });
+
+      await canalTicket.send({ embeds: [embedTicket] });
+
+      await interaction.editReply({
+        content: `✅ Tu ticket fue creado: <#${canalTicket.id}>`,
+      });
+      return;
+    }
+
+    // ---------- /close ----------
+    if (interaction.isChatInputCommand() && interaction.commandName === "close") {
+      const canal = interaction.channel;
+
+      if (!esCanalDeTicket(canal)) {
+        await interaction.reply({ content: "❌ Este comando solo funciona dentro de un ticket.", ephemeral: true });
+        return;
+      }
+
+      await interaction.reply("🔒 Cerrando este ticket en 5 segundos...");
+      setTimeout(() => {
+        canal.delete("Ticket cerrado").catch(() => {});
+      }, 5000);
+      return;
+    }
+
+    // ---------- /add ----------
+    if (interaction.isChatInputCommand() && interaction.commandName === "add") {
+      const canal = interaction.channel;
+
+      if (!esCanalDeTicket(canal)) {
+        await interaction.reply({ content: "❌ Este comando solo funciona dentro de un ticket.", ephemeral: true });
+        return;
+      }
+
+      const usuario = interaction.options.getUser("usuario");
+
+      await canal.permissionOverwrites.edit(usuario.id, {
+        ViewChannel: true,
+        SendMessages: true,
+        ReadMessageHistory: true,
+      });
+
+      const embedAdd = new EmbedBuilder()
+        .setDescription(`➕ <@${usuario.id}> fue agregado al ticket.`)
+        .setColor(0xed4245);
+
+      await interaction.reply({ embeds: [embedAdd] });
       return;
     }
   } catch (error) {
