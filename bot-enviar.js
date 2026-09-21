@@ -21,6 +21,9 @@ const {
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
+console.log("DEBUG -> TOKEN existe:", !!TOKEN, "| longitud:", TOKEN ? TOKEN.length : 0);
+console.log("DEBUG -> CLIENT_ID:", CLIENT_ID);
+console.log("DEBUG -> GUILD_ID:", GUILD_ID);
 // =====================================================
 
 const client = new Client({
