@@ -36,6 +36,7 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildPresences, // necesario para detectar desconexiones (activar en el Developer Portal)
   ],
 });
 
@@ -246,7 +247,7 @@ function esCanalDeTicket(canal) {
 // ================== SISTEMA DE SERVICIOS ==================
 // ⚠️ Revisa que este ID sea el de un ROL real de tu servidor
 const ROL_SERVICIO_ID = "1441645993627095164";
-const CANAL_LOGS_SERVICIO_ID = ""; // opcional: pon aquí el ID de un canal de texto para registrar entradas/salidas. Déjalo vacío ("") si no quieres logs.
+const CANAL_LOGS_SERVICIO_ID = "1554351355865604147"; // canal de logs: entradas, salidas, desconexiones y quién está en servicio
 const ARCHIVO_SERVICIOS = process.env.RAILWAY_VOLUME_MOUNT_PATH
   ? `${process.env.RAILWAY_VOLUME_MOUNT_PATH}/servicios_activos.json`
   : "./servicios_activos.json";
@@ -307,8 +308,25 @@ async function iniciarServicio(interaction, minutos) {
   guardarServicios();
   programarFinServicio(key, fin - inicio);
 
-  await logServicio(interaction.guild, `🟢 <@${userId}> **entró** a servicio por **${minutos} minuto(s)**. Termina <t:${Math.floor(fin / 1000)}:R>.`);
+  await logServicio(interaction.guild, `🟢 <@${userId}> **entró** a servicio a las <t:${Math.floor(inicio / 1000)}:T> por **${minutos} minuto(s)**. Termina <t:${Math.floor(fin / 1000)}:R>.`);
   pedirActualizacionRanking(interaction.guild);
+
+  await member
+    .send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(0xfee75c)
+          .setTitle("⚠️ Estás en servicio")
+          .setDescription(
+            `Entraste a servicio por **${minutos} minuto(s)**.\n\n` +
+              "🚫 **No puedes desactivarte ni desconectarte de Discord** mientras estés en servicio. " +
+              "Si lo haces, se te quitará el servicio automáticamente.\n\n" +
+              "Si te vas a salir de trabajar, finaliza tu turno con el botón **Salir de Turno**."
+          )
+          .setTimestamp(),
+      ],
+    })
+    .catch(() => {});
 
   return entrada;
 }
@@ -333,7 +351,7 @@ async function finalizarServicio(key, motivo) {
   const member = await guild.members.fetch(userId).catch(() => null);
 
   // Guarda el tiempo real que duró el servicio (para el ranking de horas)
-  sumarHoras(userId, member?.displayName, entrada, motivo === "manual" ? Date.now() : entrada.fin);
+  sumarHoras(userId, member?.displayName, entrada, motivo === "tiempo" ? entrada.fin : Date.now());
 
   if (member) {
     await member.roles.remove(ROL_SERVICIO_ID).catch((e) => {
@@ -341,21 +359,50 @@ async function finalizarServicio(key, motivo) {
     });
   }
 
+  const finReal = motivo === "tiempo" ? entrada.fin : Date.now();
+  const hora = Math.floor(finReal / 1000);
+  const duracion = formatoDuracion(finReal - entrada.inicio);
+
   const texto =
     motivo === "manual"
-      ? `🔴 <@${userId}> **salió** de servicio manualmente.`
-      : `⏰ Se cumplió el tiempo de servicio de <@${userId}>, el rol fue removido.`;
+      ? `🔴 <@${userId}> **salió** de servicio manualmente a las <t:${hora}:T>. Duración: **${duracion}**.`
+      : motivo === "desconexion"
+      ? `📴 <@${userId}> se **desconectó de Discord** a las <t:${hora}:T> (<t:${hora}:d>). Se le quitó el servicio. Duración: **${duracion}**.`
+      : `⏰ Se cumplió el tiempo de servicio de <@${userId}> a las <t:${hora}:T>, el rol fue removido. Duración: **${duracion}**.`;
 
-  await logServicio(guild, texto);
+  await logServicio(guild, texto, motivo === "desconexion" ? 0xed4245 : motivo === "manual" ? 0xfee75c : 0x57f287);
+
+  // Aviso por mensaje privado
+  if (member) {
+    const aviso =
+      motivo === "desconexion"
+        ? {
+            titulo: "📴 Se te quitó el servicio",
+            desc:
+              "Te desconectaste o te pusiste inactivo en Discord mientras estabas en servicio, " +
+              "por eso **se te quitó el servicio**.\n\nNo puedes desactivarte ni desconectarte de Discord en pleno turno.",
+            color: 0xed4245,
+          }
+        : motivo === "manual"
+        ? { titulo: "🔴 Turno finalizado", desc: "Finalizaste tu turno. Se te quitó el rol de servicio.", color: 0xed4245 }
+        : { titulo: "⏰ Tu turno terminó", desc: "Se cumplió el tiempo de tu turno y se te quitó el rol de servicio.", color: 0x57f287 };
+
+    await member
+      .send({
+        embeds: [new EmbedBuilder().setColor(aviso.color).setTitle(aviso.titulo).setDescription(aviso.desc).setTimestamp()],
+      })
+      .catch(() => {});
+  }
+
   pedirActualizacionRanking(guild);
 }
 
-async function logServicio(guild, texto) {
+async function logServicio(guild, texto, color = 0x57f287) {
   if (!CANAL_LOGS_SERVICIO_ID) return;
   const canal = await guild.channels.fetch(CANAL_LOGS_SERVICIO_ID).catch(() => null);
   if (!canal || !canal.isTextBased()) return;
 
-  const embed = new EmbedBuilder().setDescription(texto).setColor(0x57f287).setTimestamp();
+  const embed = new EmbedBuilder().setDescription(texto).setColor(color).setTimestamp();
   await canal.send({ embeds: [embed] }).catch(() => {});
 }
 
@@ -365,7 +412,7 @@ const ARCHIVO_HORAS = process.env.RAILWAY_VOLUME_MOUNT_PATH
   ? `${process.env.RAILWAY_VOLUME_MOUNT_PATH}/horas_servicio.json`
   : "./horas_servicio.json";
 
-let datosHoras = { mensajeId: null, semanaInicio: 0, usuarios: {} };
+let datosHoras = { mensajeId: null, mensajeActivosId: null, semanaInicio: 0, usuarios: {} };
 
 function cargarHoras() {
   try {
@@ -373,6 +420,7 @@ function cargarHoras() {
     const data = JSON.parse(fs.readFileSync(ARCHIVO_HORAS, "utf8"));
     datosHoras = {
       mensajeId: data.mensajeId ?? null,
+      mensajeActivosId: data.mensajeActivosId ?? null,
       semanaInicio: data.semanaInicio ?? 0,
       usuarios: data.usuarios ?? {},
     };
@@ -456,7 +504,10 @@ function crearEmbedRanking(guild) {
     .setColor(0x57f287)
     .setTitle(`⏱️ Ranking de Horas en Servicio — ${guild.name}`)
     .setThumbnail(guild.iconURL({ size: 256 }) || null)
-    .setDescription(lineas.length ? lineas.join("\n") : "Nadie ha entrado en servicio esta semana.")
+    .setDescription(
+      (lineas.length ? lineas.join("\n") : "Nadie ha entrado en servicio esta semana.") +
+        "\n\n⚠️ Si te vas a salir de trabajar en el taller, **finaliza tu turno**."
+    )
     .setFooter({
       text: `Semana desde: ${new Date(datosHoras.semanaInicio).toLocaleString("es-DO", {
         timeZone: "America/Santo_Domingo",
@@ -493,10 +544,49 @@ async function actualizarRanking(guild) {
   }
 }
 
+// Mensaje en el canal de logs con quiénes tienen el servicio prendido ahora mismo
+async function actualizarActivos(guild) {
+  if (!CANAL_LOGS_SERVICIO_ID) return;
+  const canal = await guild.channels.fetch(CANAL_LOGS_SERVICIO_ID).catch(() => null);
+  if (!canal || !canal.isTextBased()) return;
+
+  const lista = [...serviciosActivos.values()]
+    .filter((e) => e.guildId === guild.id)
+    .sort((a, b) => a.inicio - b.inicio)
+    .map(
+      (e) =>
+        `🟢 <@${e.userId}> — desde <t:${Math.floor(e.inicio / 1000)}:T>, termina <t:${Math.floor(e.fin / 1000)}:R>`
+    );
+
+  const embed = new EmbedBuilder()
+    .setColor(0x57f287)
+    .setTitle(`🟢 En servicio ahora (${lista.length})`)
+    .setDescription(lista.length ? lista.join("\n") : "Nadie está en servicio ahora mismo.")
+    .setTimestamp();
+
+  let mensaje = null;
+  if (datosHoras.mensajeActivosId) {
+    mensaje = await canal.messages.fetch(datosHoras.mensajeActivosId).catch(() => null);
+  }
+
+  if (mensaje) {
+    await mensaje.edit({ embeds: [embed] }).catch((e) => console.error("Error al editar en servicio ahora:", e));
+  } else {
+    const nuevo = await canal.send({ embeds: [embed] }).catch(() => null);
+    if (nuevo) {
+      datosHoras.mensajeActivosId = nuevo.id;
+      guardarHoras();
+    }
+  }
+}
+
 // Cola para que las actualizaciones no se pisen entre sí
 let colaRanking = Promise.resolve();
 function pedirActualizacionRanking(guild) {
-  colaRanking = colaRanking.then(() => actualizarRanking(guild)).catch(() => {});
+  colaRanking = colaRanking
+    .then(() => actualizarRanking(guild))
+    .then(() => actualizarActivos(guild))
+    .catch(() => {});
 }
 
 // ================== SISTEMA DE FICHAJES ==================
@@ -594,7 +684,8 @@ function crearEmbedFormatoFichajes(guild) {
         "Servicio:\n" +
         "Tipo:\n" +
         "Total:\n" +
-        "```"
+        "```\n" +
+        "⚠️ **Advertencia:** el límite es de **200k**."
     )
     .setFooter({ text: "Demon Racing • Fichajes", iconURL: guild.iconURL() || undefined })
     .setTimestamp();
@@ -1350,6 +1441,18 @@ client.once("ready", async () => {
       pedirActualizacionRanking(guildRanking);
     }, 5 * 60 * 1000);
   }
+});
+
+// ================== DESCONEXIÓN EN SERVICIO ==================
+// Si alguien en servicio se desconecta / se pone invisible, se le quita el servicio
+client.on("presenceUpdate", (oldPresence, newPresence) => {
+  if (!newPresence || !newPresence.guild) return;
+  if (newPresence.status !== "offline") return;
+
+  const key = `${newPresence.guild.id}:${newPresence.userId}`;
+  if (!serviciosActivos.has(key)) return;
+
+  finalizarServicio(key, "desconexion");
 });
 
 // ================== INTERACCIONES ==================
