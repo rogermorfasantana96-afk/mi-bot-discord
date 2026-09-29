@@ -159,6 +159,25 @@ client.on("messageCreate", async (mensaje) => {
     return;
   }
 
+  // ---- Sumar los "Total:" de los canales de fichaje a la Tabla de Facturas ----
+  if (mensaje.channel.topic && mensaje.channel.topic.startsWith("fichaje:")) {
+    let suma = 0;
+    let cantidad = 0;
+    for (const m of mensaje.content.matchAll(/total:\s*\$?\s*([\d.,]+)/gi)) {
+      const valor = limpiarNumero(m[1]);
+      if (valor > 0) {
+        suma += valor;
+        cantidad++;
+      }
+    }
+
+    if (cantidad > 0) {
+      const nombre = (mensaje.member?.displayName ?? mensaje.author.username).replace(/\s+/g, "_");
+      registrarFactura(mensaje.author.id, nombre, suma, cantidad);
+      pedirActualizacionTabla(mensaje.guild);
+    }
+  }
+
   const tipoLink = detectarTipoLink(mensaje.content);
   if (tipoLink) {
     mensaje.reply(`🔗 Ese link es de: **${tipoLink}**`).catch(() => {});
@@ -464,12 +483,124 @@ function permisosPrivados(guild, usuarioIds = []) {
   ];
 }
 
-// Solo el staff (los roles de arriba) o un administrador puede crear y cerrar fichajes
+// Solo el staff (los roles de arriba) o un administrador puede crear/cerrar fichajes y cobrar
 function puedeCrearFichajes(member) {
   return (
     member.permissions.has(PermissionFlagsBits.Administrator) ||
     member.roles.cache.some((r) => ROLES_STAFF_CANALES.includes(r.id))
   );
+}
+
+// ================== TABLA DE FACTURAS ==================
+const CANAL_TABLA_FACTURAS_ID = "1455605689564008501";
+const PORCENTAJE_GENERAL = 0.25; // porcentaje que se aplica a todos en /cobrar-todos
+const ARCHIVO_FACTURAS = process.env.RAILWAY_VOLUME_MOUNT_PATH
+  ? `${process.env.RAILWAY_VOLUME_MOUNT_PATH}/facturas.json`
+  : "./facturas.json";
+
+let datosFacturas = { mensajeId: null, empleados: {} };
+
+function cargarFacturas() {
+  try {
+    if (!fs.existsSync(ARCHIVO_FACTURAS)) return;
+    const data = JSON.parse(fs.readFileSync(ARCHIVO_FACTURAS, "utf8"));
+    datosFacturas = { mensajeId: data.mensajeId ?? null, empleados: data.empleados ?? {} };
+  } catch (e) {
+    console.error("Error al cargar facturas.json:", e);
+  }
+}
+
+function guardarFacturas() {
+  try {
+    fs.writeFileSync(ARCHIVO_FACTURAS, JSON.stringify(datosFacturas, null, 2));
+  } catch (e) {
+    console.error("Error al guardar facturas.json:", e);
+  }
+}
+
+function formatoDinero(n) {
+  return "$" + Number(n).toLocaleString("en-US");
+}
+
+function normalizarPorcentaje(p) {
+  return p > 1 ? p / 100 : p; // 25 -> 0.25
+}
+
+function textoPorcentaje(p) {
+  return `${Math.round(p * 10000) / 100}%`;
+}
+
+function registrarFactura(userId, nombre, monto, cantidad) {
+  const emp = datosFacturas.empleados[userId] ?? { nombre, facturas: 0, total: 0 };
+  emp.nombre = nombre;
+  emp.facturas += cantidad;
+  emp.total += monto;
+  datosFacturas.empleados[userId] = emp;
+  guardarFacturas();
+}
+
+// La tabla queda en blanco (solo encabezados, $0 y 0 facturas) hasta que alguien digite
+function crearEmbedTabla() {
+  const lista = Object.values(datosFacturas.empleados)
+    .filter((e) => e.facturas > 0)
+    .sort((a, b) => b.total - a.total);
+
+  const totalGeneral = lista.reduce((s, e) => s + e.total, 0);
+  const facturasGeneral = lista.reduce((s, e) => s + e.facturas, 0);
+
+  const anchoNombre = Math.max(8, ...lista.map((e) => e.nombre.length));
+  const anchoTotal = Math.max(5, ...lista.map((e) => formatoDinero(e.total).length));
+  const encabezado = `${"EMPLEADO".padEnd(anchoNombre)} | FACTURAS | ${"TOTAL".padStart(anchoTotal)}`;
+  const linea = "-".repeat(encabezado.length);
+  const filas = lista.map(
+    (e) =>
+      `${e.nombre.padEnd(anchoNombre)} | ${String(e.facturas).padStart(8)} | ${formatoDinero(e.total).padStart(anchoTotal)}`
+  );
+
+  return new EmbedBuilder()
+    .setColor(0xfee75c)
+    .setTitle("Tabla de Facturas")
+    .setDescription("```\n" + [encabezado, linea, ...filas].join("\n") + "\n```")
+    .addFields(
+      { name: "Total", value: `**${formatoDinero(totalGeneral)}**`, inline: true },
+      { name: "Facturas", value: `**${facturasGeneral}**`, inline: true }
+    )
+    .setFooter({ text: "Actualización automática" })
+    .setTimestamp();
+}
+
+// Edita el mismo mensaje de la tabla; solo publica uno nuevo si no existe
+async function actualizarTablaFacturas(guild) {
+  const canal = await guild.channels.fetch(CANAL_TABLA_FACTURAS_ID).catch(() => null);
+  if (!canal || !canal.isTextBased()) {
+    console.error("No encuentro el canal de la tabla de facturas.");
+    return;
+  }
+
+  const embed = crearEmbedTabla();
+  let mensaje = null;
+  if (datosFacturas.mensajeId) {
+    mensaje = await canal.messages.fetch(datosFacturas.mensajeId).catch(() => null);
+  }
+
+  if (mensaje) {
+    await mensaje.edit({ embeds: [embed] }).catch((e) => console.error("Error al editar la tabla:", e));
+  } else {
+    const nuevo = await canal.send({ embeds: [embed] }).catch((e) => {
+      console.error("Error al enviar la tabla:", e);
+      return null;
+    });
+    if (nuevo) {
+      datosFacturas.mensajeId = nuevo.id;
+      guardarFacturas();
+    }
+  }
+}
+
+// Cola para que las actualizaciones no se pisen entre sí
+let colaTabla = Promise.resolve();
+function pedirActualizacionTabla(guild) {
+  colaTabla = colaTabla.then(() => actualizarTablaFacturas(guild)).catch(() => {});
 }
 
 // ================== COMANDOS SLASH ==================
@@ -569,6 +700,31 @@ const comandos = [
         .setMaxLength(100)
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
+
+  new SlashCommandBuilder()
+    .setName("limpiar-total")
+    .setDescription("Limpia la Tabla de Facturas (a todos o a una persona) cuando van a cobrar")
+    .addUserOption((op) =>
+      op.setName("usuario").setDescription("Solo limpiar a esta persona (vacío = limpiar a todos)")
+    ),
+
+  new SlashCommandBuilder()
+    .setName("cobrar-todos")
+    .setDescription("Factura de cobro de todos con el porcentaje general (25%)"),
+
+  new SlashCommandBuilder()
+    .setName("cobrar-persona")
+    .setDescription("Factura de cobro de una persona con su propio porcentaje")
+    .addUserOption((op) =>
+      op.setName("usuario").setDescription("Persona a cobrar").setRequired(true)
+    )
+    .addNumberOption((op) =>
+      op
+        .setName("porcentaje")
+        .setDescription("Su porcentaje. Ej: 0.30 o 30")
+        .setRequired(true)
+        .setMinValue(0)
+    ),
 ].map((c) => c.toJSON());
 
 async function registrarComandos() {
@@ -582,6 +738,11 @@ async function registrarComandos() {
 client.once("ready", async () => {
   console.log(`Bot conectado como ${client.user.tag}`);
   await registrarComandos();
+
+  // Cargar la tabla de facturas y publicarla/actualizarla al encender
+  cargarFacturas();
+  const guildTabla = await client.guilds.fetch(GUILD_ID).catch(() => null);
+  if (guildTabla) pedirActualizacionTabla(guildTabla);
 
   // Restaurar servicios activos guardados (por si Railway reinició el bot)
   cargarServicios();
@@ -1236,6 +1397,119 @@ client.on("interactionCreate", async (interaction) => {
           "❌ No pude leer los mensajes. Revisa que el bot tenga permiso de ver el canal y leer el historial."
         );
       }
+      return;
+    }
+
+    // ---------- /limpiar-total ----------
+    if (interaction.isChatInputCommand() && interaction.commandName === "limpiar-total") {
+      if (!puedeCrearFichajes(interaction.member)) {
+        await interaction.reply({ content: "❌ Solo el staff puede limpiar los totales.", ephemeral: true });
+        return;
+      }
+
+      const usuario = interaction.options.getUser("usuario");
+      let texto;
+
+      if (usuario) {
+        if (!datosFacturas.empleados[usuario.id]) {
+          await interaction.reply({ content: `⚠️ <@${usuario.id}> no tiene facturas en la tabla.`, ephemeral: true });
+          return;
+        }
+        delete datosFacturas.empleados[usuario.id];
+        texto = `🧹 Se limpió el total de <@${usuario.id}>.`;
+      } else {
+        datosFacturas.empleados = {};
+        texto = "🧹 Se limpió toda la Tabla de Facturas.";
+      }
+
+      guardarFacturas();
+      pedirActualizacionTabla(interaction.guild);
+      await interaction.reply({ content: texto, ephemeral: true });
+      return;
+    }
+
+    // ---------- /cobrar-todos ----------
+    if (interaction.isChatInputCommand() && interaction.commandName === "cobrar-todos") {
+      if (!puedeCrearFichajes(interaction.member)) {
+        await interaction.reply({ content: "❌ Solo el staff puede sacar la factura de todos.", ephemeral: true });
+        return;
+      }
+
+      const lista = Object.values(datosFacturas.empleados)
+        .filter((e) => e.total > 0)
+        .sort((a, b) => b.total - a.total)
+        .map((e) => ({
+          nombre: e.nombre,
+          total: e.total,
+          aCobrar: Math.round(e.total * PORCENTAJE_GENERAL),
+        }));
+
+      if (lista.length === 0) {
+        await interaction.reply({ content: "⚠️ No hay facturas en la tabla.", ephemeral: true });
+        return;
+      }
+
+      const anchoNombre = Math.max(8, ...lista.map((x) => x.nombre.length));
+      const anchoTotal = Math.max(5, ...lista.map((x) => formatoDinero(x.total).length));
+      const anchoCobro = Math.max(8, ...lista.map((x) => formatoDinero(x.aCobrar).length));
+
+      const encabezado = `${"EMPLEADO".padEnd(anchoNombre)} | ${"TOTAL".padStart(anchoTotal)} | ${"A COBRAR".padStart(anchoCobro)}`;
+      const linea = "-".repeat(encabezado.length);
+      const filas = lista.map(
+        (x) =>
+          `${x.nombre.padEnd(anchoNombre)} | ${formatoDinero(x.total).padStart(anchoTotal)} | ${formatoDinero(x.aCobrar).padStart(anchoCobro)}`
+      );
+
+      const totalGenerado = lista.reduce((s, x) => s + x.total, 0);
+      const totalCobrar = lista.reduce((s, x) => s + x.aCobrar, 0);
+
+      const embedTodos = new EmbedBuilder()
+        .setColor(0x57f287)
+        .setTitle(`🧾 Factura de cobro (${textoPorcentaje(PORCENTAJE_GENERAL)})`)
+        .setDescription("```\n" + [encabezado, linea, ...filas].join("\n") + "\n```")
+        .addFields(
+          { name: "Total generado", value: `**${formatoDinero(totalGenerado)}**`, inline: true },
+          { name: "💵 Total a cobrar", value: `**${formatoDinero(totalCobrar)}**`, inline: true }
+        )
+        .setFooter({ text: "Demon Racing • Cobros", iconURL: interaction.guild.iconURL() || undefined })
+        .setTimestamp();
+
+      await interaction.reply({ embeds: [embedTodos] });
+      return;
+    }
+
+    // ---------- /cobrar-persona ----------
+    if (interaction.isChatInputCommand() && interaction.commandName === "cobrar-persona") {
+      if (!puedeCrearFichajes(interaction.member)) {
+        await interaction.reply({ content: "❌ Solo el staff puede sacar esta factura.", ephemeral: true });
+        return;
+      }
+
+      const usuario = interaction.options.getUser("usuario");
+      const porcentaje = normalizarPorcentaje(interaction.options.getNumber("porcentaje"));
+
+      const emp = datosFacturas.empleados[usuario.id];
+      if (!emp || emp.total <= 0) {
+        await interaction.reply({ content: `⚠️ <@${usuario.id}> no tiene facturas en la tabla.`, ephemeral: true });
+        return;
+      }
+
+      const aCobrar = Math.round(emp.total * porcentaje);
+
+      const embedUno = new EmbedBuilder()
+        .setColor(0x57f287)
+        .setTitle("🧾 Factura de cobro")
+        .addFields(
+          { name: "Empleado", value: `<@${usuario.id}>`, inline: true },
+          { name: "Facturas", value: `**${emp.facturas}**`, inline: true },
+          { name: "Total generado", value: `**${formatoDinero(emp.total)}**`, inline: true },
+          { name: "Porcentaje", value: `**${textoPorcentaje(porcentaje)}**`, inline: true },
+          { name: "💵 A cobrar", value: `**${formatoDinero(aCobrar)}**`, inline: true }
+        )
+        .setFooter({ text: "Demon Racing • Cobros", iconURL: interaction.guild.iconURL() || undefined })
+        .setTimestamp();
+
+      await interaction.reply({ embeds: [embedUno] });
       return;
     }
 
