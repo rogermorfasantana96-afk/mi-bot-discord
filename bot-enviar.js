@@ -331,9 +331,6 @@ async function logServicio(guild, texto) {
 }
 
 // ================== SISTEMA DE FICHAJES ==================
-// Guarda el último total calculado por cada usuario
-const ultimoTotalFichajes = new Map();
-
 // Convierte "10,000" / "10.000" / "1500" en número
 function limpiarNumero(txt) {
   return parseInt(String(txt).replace(/[.,]/g, ""), 10) || 0;
@@ -409,39 +406,17 @@ const comandos = [
     .setDescription("Publica el panel para entrar a servicio"),
 
   new SlashCommandBuilder()
-    .setName("fichajes")
-    .setDescription("Calcula el total de fichajes de un canal")
-    .addChannelOption((op) =>
-      op
-        .setName("canal")
-        .setDescription("Canal donde están los fichajes (por defecto, este)")
-        .addChannelTypes(ChannelType.GuildText)
-    )
-    .addUserOption((op) =>
-      op.setName("usuario").setDescription("Sumar solo los mensajes de este usuario")
-    )
-    .addIntegerOption((op) =>
-      op
-        .setName("cantidad")
-        .setDescription("Cuántos mensajes revisar (por defecto 100, máx. 1000)")
-        .setMinValue(1)
-        .setMaxValue(1000)
-    ),
+    .setName("total")
+    .setDescription("Suma todos los totales de este canal"),
 
   new SlashCommandBuilder()
     .setName("dividir")
-    .setDescription("Calcula cuánto generó según su porcentaje")
+    .setDescription("Suma los totales de este canal y calcula cuánto generó según su porcentaje")
     .addNumberOption((op) =>
       op
         .setName("porcentaje")
         .setDescription("Su porcentaje por rol. Ej: 0.25 o 25")
         .setRequired(true)
-        .setMinValue(0)
-    )
-    .addNumberOption((op) =>
-      op
-        .setName("total")
-        .setDescription("Total manual (si no, usa el último /fichajes que hiciste)")
         .setMinValue(0)
     ),
 ].map((c) => c.toJSON());
@@ -800,20 +775,15 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    // ---------- /fichajes ----------
-    if (interaction.isChatInputCommand() && interaction.commandName === "fichajes") {
-      const canal = interaction.options.getChannel("canal") ?? interaction.channel;
-      const usuario = interaction.options.getUser("usuario");
-      const cantidad = interaction.options.getInteger("cantidad") ?? 100;
-
+    // ---------- /total ----------
+    if (interaction.isChatInputCommand() && interaction.commandName === "total") {
       await interaction.deferReply();
 
       try {
-        const total = await calcularTotalFichajes(canal, cantidad, usuario);
-        ultimoTotalFichajes.set(interaction.user.id, total);
+        const total = await calcularTotalFichajes(interaction.channel, 1000, null);
         await interaction.editReply(`💰 Total: **${total.toLocaleString("en-US")}**`);
       } catch (e) {
-        console.error("Error en /fichajes:", e);
+        console.error("Error en /total:", e);
         await interaction.editReply(
           "❌ No pude leer los mensajes. Revisa que el bot tenga permiso de ver el canal y leer el historial."
         );
@@ -826,19 +796,18 @@ client.on("interactionCreate", async (interaction) => {
       let porcentaje = interaction.options.getNumber("porcentaje");
       if (porcentaje > 1) porcentaje = porcentaje / 100; // 25 -> 0.25
 
-      const total =
-        interaction.options.getNumber("total") ?? ultimoTotalFichajes.get(interaction.user.id);
+      await interaction.deferReply();
 
-      if (total === undefined) {
-        await interaction.reply({
-          content: "⚠️ Primero usa `/fichajes` para calcular el total, o escribe el total en el campo `total`.",
-          ephemeral: true,
-        });
-        return;
+      try {
+        const total = await calcularTotalFichajes(interaction.channel, 1000, null);
+        const generado = Math.round(total * porcentaje);
+        await interaction.editReply(`💵 Generó: **${generado.toLocaleString("en-US")}**`);
+      } catch (e) {
+        console.error("Error en /dividir:", e);
+        await interaction.editReply(
+          "❌ No pude leer los mensajes. Revisa que el bot tenga permiso de ver el canal y leer el historial."
+        );
       }
-
-      const generado = Math.round(total * porcentaje);
-      await interaction.reply(`💵 Generó: **${generado.toLocaleString("en-US")}**`);
       return;
     }
 
