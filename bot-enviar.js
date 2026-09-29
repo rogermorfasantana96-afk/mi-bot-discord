@@ -330,6 +330,41 @@ async function logServicio(guild, texto) {
   await canal.send({ embeds: [embed] }).catch(() => {});
 }
 
+// ================== SISTEMA DE FICHAJES ==================
+// Guarda el último total calculado por cada usuario
+const ultimoTotalFichajes = new Map();
+
+// Convierte "10,000" / "10.000" / "1500" en número
+function limpiarNumero(txt) {
+  return parseInt(String(txt).replace(/[.,]/g, ""), 10) || 0;
+}
+
+// Lee los mensajes del canal y suma todas las líneas "Total: X"
+async function calcularTotalFichajes(canal, cantidad, usuario) {
+  let total = 0;
+  let ultimoId;
+  let restantes = cantidad;
+
+  while (restantes > 0) {
+    const lote = await canal.messages.fetch({
+      limit: Math.min(100, restantes),
+      ...(ultimoId && { before: ultimoId }),
+    });
+    if (lote.size === 0) break;
+
+    for (const msg of lote.values()) {
+      if (usuario && msg.author.id !== usuario.id) continue;
+      const coincidencias = msg.content.matchAll(/total:\s*\$?\s*([\d.,]+)/gi);
+      for (const m of coincidencias) total += limpiarNumero(m[1]);
+    }
+
+    ultimoId = lote.last().id;
+    restantes -= lote.size;
+  }
+
+  return total;
+}
+
 // ================== COMANDOS SLASH ==================
 const comandos = [
   new SlashCommandBuilder()
@@ -372,6 +407,43 @@ const comandos = [
   new SlashCommandBuilder()
     .setName("panel-servicios")
     .setDescription("Publica el panel para entrar a servicio"),
+
+  new SlashCommandBuilder()
+    .setName("fichajes")
+    .setDescription("Calcula el total de fichajes de un canal")
+    .addChannelOption((op) =>
+      op
+        .setName("canal")
+        .setDescription("Canal donde están los fichajes (por defecto, este)")
+        .addChannelTypes(ChannelType.GuildText)
+    )
+    .addUserOption((op) =>
+      op.setName("usuario").setDescription("Sumar solo los mensajes de este usuario")
+    )
+    .addIntegerOption((op) =>
+      op
+        .setName("cantidad")
+        .setDescription("Cuántos mensajes revisar (por defecto 100, máx. 1000)")
+        .setMinValue(1)
+        .setMaxValue(1000)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("dividir")
+    .setDescription("Calcula cuánto generó según su porcentaje")
+    .addNumberOption((op) =>
+      op
+        .setName("porcentaje")
+        .setDescription("Su porcentaje por rol. Ej: 0.25 o 25")
+        .setRequired(true)
+        .setMinValue(0)
+    )
+    .addNumberOption((op) =>
+      op
+        .setName("total")
+        .setDescription("Total manual (si no, usa el último /fichajes que hiciste)")
+        .setMinValue(0)
+    ),
 ].map((c) => c.toJSON());
 
 async function registrarComandos() {
@@ -725,6 +797,48 @@ client.on("interactionCreate", async (interaction) => {
         .setColor(0xed4245);
 
       await interaction.reply({ embeds: [embedAdd] });
+      return;
+    }
+
+    // ---------- /fichajes ----------
+    if (interaction.isChatInputCommand() && interaction.commandName === "fichajes") {
+      const canal = interaction.options.getChannel("canal") ?? interaction.channel;
+      const usuario = interaction.options.getUser("usuario");
+      const cantidad = interaction.options.getInteger("cantidad") ?? 100;
+
+      await interaction.deferReply();
+
+      try {
+        const total = await calcularTotalFichajes(canal, cantidad, usuario);
+        ultimoTotalFichajes.set(interaction.user.id, total);
+        await interaction.editReply(`💰 Total: **${total.toLocaleString("en-US")}**`);
+      } catch (e) {
+        console.error("Error en /fichajes:", e);
+        await interaction.editReply(
+          "❌ No pude leer los mensajes. Revisa que el bot tenga permiso de ver el canal y leer el historial."
+        );
+      }
+      return;
+    }
+
+    // ---------- /dividir ----------
+    if (interaction.isChatInputCommand() && interaction.commandName === "dividir") {
+      let porcentaje = interaction.options.getNumber("porcentaje");
+      if (porcentaje > 1) porcentaje = porcentaje / 100; // 25 -> 0.25
+
+      const total =
+        interaction.options.getNumber("total") ?? ultimoTotalFichajes.get(interaction.user.id);
+
+      if (total === undefined) {
+        await interaction.reply({
+          content: "⚠️ Primero usa `/fichajes` para calcular el total, o escribe el total en el campo `total`.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const generado = Math.round(total * porcentaje);
+      await interaction.reply(`💵 Generó: **${generado.toLocaleString("en-US")}**`);
       return;
     }
 
