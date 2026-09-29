@@ -17,6 +17,8 @@ const {
   StringSelectMenuBuilder,
   ChannelType,
   PermissionFlagsBits,
+  OverwriteType,
+  UserSelectMenuBuilder,
 } = require("discord.js");
 
 // ================== CONFIGURACIÓN ==================
@@ -429,6 +431,45 @@ function crearEmbedFormatoFichajes(guild) {
     )
     .setFooter({ text: "Demon Racing • Fichajes", iconURL: guild.iconURL() || undefined })
     .setTimestamp();
+}
+
+// ================== CANALES PRIVADOS (SOLO STAFF) ==================
+// Estos roles son los únicos que ven los canales/categorías creados con /crear-canal y /crear-categoria
+const ROLES_STAFF_CANALES = [
+  "1519055985526702220",
+  "1441778132180009081",
+  "1471124977356111954",
+  "1441594428727754894",
+  "1466587830729052435",
+  "1441645297540268105",
+];
+
+const PERMISOS_VER_Y_HABLAR = [
+  PermissionFlagsBits.ViewChannel,
+  PermissionFlagsBits.SendMessages,
+  PermissionFlagsBits.ReadMessageHistory,
+  PermissionFlagsBits.Connect,
+  PermissionFlagsBits.Speak,
+];
+
+// Everyone no ve nada. Solo ven: los roles del staff, el bot y las personas que indiques.
+function permisosPrivados(guild, usuarioIds = []) {
+  const rolesValidos = ROLES_STAFF_CANALES.filter((id) => guild.roles.cache.has(id));
+  const miembros = [guild.members.me.id, ...usuarioIds];
+
+  return [
+    { id: guild.roles.everyone.id, type: OverwriteType.Role, deny: [PermissionFlagsBits.ViewChannel] },
+    ...rolesValidos.map((id) => ({ id, type: OverwriteType.Role, allow: PERMISOS_VER_Y_HABLAR })),
+    ...miembros.map((id) => ({ id, type: OverwriteType.Member, allow: PERMISOS_VER_Y_HABLAR })),
+  ];
+}
+
+// Solo el staff (los roles de arriba) o un administrador puede crear fichajes
+function puedeCrearFichajes(member) {
+  return (
+    member.permissions.has(PermissionFlagsBits.Administrator) ||
+    member.roles.cache.some((r) => ROLES_STAFF_CANALES.includes(r.id))
+  );
 }
 
 // ================== COMANDOS SLASH ==================
@@ -891,10 +932,11 @@ client.on("interactionCreate", async (interaction) => {
         .setTitle("🛠️ Fichajes — Demon Racing")
         .setThumbnail(interaction.guild.iconURL({ size: 256 }) || null)
         .setDescription(
-          "Presiona **Crear fichaje** para abrir tu canal de fichajes.\n\n" +
-            "📝 Te vamos a pedir tu **nombre** y tu **ID**.\n" +
-            "📋 Cuando se cree el canal, ahí mismo se envía el formato que debes usar.\n\n" +
-            "⚠️ Solo puedes tener **un canal de fichajes** a la vez."
+          "Presiona **Crear fichaje** para abrir el canal de fichajes de una persona.\n\n" +
+            "👤 Primero eliges a la **persona**.\n" +
+            "📝 Luego escribes su **nombre** y su **ID**.\n" +
+            "📋 Cuando se cree el canal, ahí mismo se envía el formato que debe usar.\n\n" +
+            "⚠️ Cada persona solo puede tener **un canal de fichajes** a la vez."
         )
         .setFooter({ text: "Demon Racing • Fichajes", iconURL: interaction.guild.iconURL() || undefined })
         .setTimestamp();
@@ -911,21 +953,42 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    // ---------- Botón: Crear fichaje ----------
+    // ---------- Botón: Crear fichaje (paso 1: elegir a la persona) ----------
     if (interaction.isButton() && interaction.customId === "crear_fichaje_btn") {
-      const yaExiste = interaction.guild.channels.cache.find(
-        (c) => c.topic === `fichaje:${interaction.user.id}`
+      if (!puedeCrearFichajes(interaction.member)) {
+        await interaction.reply({ content: "❌ Solo el staff puede crear fichajes.", ephemeral: true });
+        return;
+      }
+
+      const selector = new ActionRowBuilder().addComponents(
+        new UserSelectMenuBuilder()
+          .setCustomId("seleccionar_usuario_fichaje")
+          .setPlaceholder("Elige a la persona")
       );
+
+      await interaction.reply({
+        content: "Elige a la persona para quien es el canal de fichajes:",
+        components: [selector],
+        ephemeral: true,
+      });
+      return;
+    }
+
+    // ---------- Persona elegida (paso 2: nombre e ID) ----------
+    if (interaction.isUserSelectMenu() && interaction.customId === "seleccionar_usuario_fichaje") {
+      const userId = interaction.values[0];
+
+      const yaExiste = interaction.guild.channels.cache.find((c) => c.topic === `fichaje:${userId}`);
       if (yaExiste) {
-        await interaction.reply({
-          content: `⚠️ Ya tienes un canal de fichajes: <#${yaExiste.id}>`,
-          ephemeral: true,
+        await interaction.update({
+          content: `⚠️ <@${userId}> ya tiene un canal de fichajes: <#${yaExiste.id}>`,
+          components: [],
         });
         return;
       }
 
       const modal = new ModalBuilder()
-        .setCustomId("modal_crear_fichaje")
+        .setCustomId(`modal_crear_fichaje:${userId}`)
         .setTitle("Crear fichaje");
 
       const inputNombre = new TextInputBuilder()
@@ -937,9 +1000,8 @@ client.on("interactionCreate", async (interaction) => {
 
       const inputId = new TextInputBuilder()
         .setCustomId("input_id_fichaje")
-        .setLabel("Tu ID")
+        .setLabel("ID (ej: 25366)")
         .setStyle(TextInputStyle.Short)
-        .setPlaceholder("Ej: 25366")
         .setRequired(true)
         .setMaxLength(15);
 
@@ -952,18 +1014,30 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    // ---------- Modal: Crear fichaje enviado ----------
-    if (interaction.isModalSubmit() && interaction.customId === "modal_crear_fichaje") {
+    // ---------- Modal: Crear fichaje enviado (paso 3: crear el canal) ----------
+    if (interaction.isModalSubmit() && interaction.customId.startsWith("modal_crear_fichaje:")) {
       try {
         const guild = interaction.guild;
+        const userId = interaction.customId.split(":")[1];
         const nombre = interaction.fields.getTextInputValue("input_nombre_fichaje").trim();
         const idJugador = interaction.fields.getTextInputValue("input_id_fichaje").trim();
 
         await interaction.deferReply({ ephemeral: true });
 
-        const yaExiste = guild.channels.cache.find((c) => c.topic === `fichaje:${interaction.user.id}`);
+        if (!puedeCrearFichajes(interaction.member)) {
+          await interaction.editReply({ content: "❌ Solo el staff puede crear fichajes." });
+          return;
+        }
+
+        const persona = await guild.members.fetch(userId).catch(() => null);
+        if (!persona) {
+          await interaction.editReply({ content: "❌ No encuentro a esa persona en el servidor." });
+          return;
+        }
+
+        const yaExiste = guild.channels.cache.find((c) => c.topic === `fichaje:${userId}`);
         if (yaExiste) {
-          await interaction.editReply({ content: `⚠️ Ya tienes un canal de fichajes: <#${yaExiste.id}>` });
+          await interaction.editReply({ content: `⚠️ <@${userId}> ya tiene un canal de fichajes: <#${yaExiste.id}>` });
           return;
         }
 
@@ -984,14 +1058,9 @@ client.on("interactionCreate", async (interaction) => {
           name: nombreCanal,
           type: ChannelType.GuildText,
           parent: categoria.id,
-          topic: `fichaje:${interaction.user.id}`,
-        });
-
-        // Le damos acceso a quien lo creó (además de lo que ya tenga la categoría)
-        await canal.permissionOverwrites.edit(interaction.user.id, {
-          ViewChannel: true,
-          SendMessages: true,
-          ReadMessageHistory: true,
+          topic: `fichaje:${userId}`,
+          // Privado: solo lo ven los roles del staff, el bot y la persona elegida
+          permissionOverwrites: permisosPrivados(guild, [userId]),
         });
 
         await canal.send({
@@ -1000,7 +1069,7 @@ client.on("interactionCreate", async (interaction) => {
           allowedMentions: { parse: ["everyone"] },
         });
 
-        await interaction.editReply({ content: `✅ Tu canal de fichajes fue creado: <#${canal.id}>` });
+        await interaction.editReply({ content: `✅ Canal de fichajes creado para <@${userId}>: <#${canal.id}>` });
       } catch (e) {
         console.error("Error al crear el fichaje:", e);
         if (interaction.deferred) {
@@ -1039,8 +1108,9 @@ client.on("interactionCreate", async (interaction) => {
       const nombre = interaction.options.getString("nombre")?.trim();
       const tipo = interaction.options.getString("tipo") ?? "texto";
       const nombreCategoria = interaction.options.getString("categoria")?.trim();
+      const nombreCanal = nombre;
 
-      if (!nombre && !nombreCategoria) {
+      if (!nombreCanal && !nombreCategoria) {
         await interaction.reply({
           content: "⚠️ Escribe al menos el nombre del canal o el nombre de la categoría.",
           ephemeral: true,
@@ -1072,7 +1142,7 @@ client.on("interactionCreate", async (interaction) => {
           }
         }
 
-        if (!nombre) {
+        if (!nombreCanal) {
           await interaction.editReply(
             categoriaCreada
               ? `✅ Categoría creada: **${categoria.name}**`
@@ -1082,7 +1152,7 @@ client.on("interactionCreate", async (interaction) => {
         }
 
         const canal = await interaction.guild.channels.create({
-          name: nombre,
+          name: nombreCanal,
           type: tipo === "voz" ? ChannelType.GuildVoice : ChannelType.GuildText,
           parent: categoria ? categoria.id : undefined,
         });
