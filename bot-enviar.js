@@ -493,6 +493,41 @@ const comandos = [
     .setName("panel-fichajes")
     .setDescription("Publica el panel para crear canales de fichajes")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
+
+  new SlashCommandBuilder()
+    .setName("crear-categoria")
+    .setDescription("Crea una categoría nueva")
+    .addStringOption((op) =>
+      op
+        .setName("nombre")
+        .setDescription("Nombre de la categoría")
+        .setRequired(true)
+        .setMaxLength(100)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
+
+  new SlashCommandBuilder()
+    .setName("crear-canal")
+    .setDescription("Crea un canal y/o una categoría")
+    .addStringOption((op) =>
+      op
+        .setName("nombre")
+        .setDescription("Nombre del canal (opcional)")
+        .setMaxLength(100)
+    )
+    .addStringOption((op) =>
+      op
+        .setName("tipo")
+        .setDescription("Texto o voz (por defecto texto)")
+        .addChoices({ name: "Texto", value: "texto" }, { name: "Voz", value: "voz" })
+    )
+    .addStringOption((op) =>
+      op
+        .setName("categoria")
+        .setDescription("Nombre de la categoría (si no existe, se crea)")
+        .setMaxLength(100)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
 ].map((c) => c.toJSON());
 
 async function registrarComandos() {
@@ -975,6 +1010,94 @@ client.on("interactionCreate", async (interaction) => {
             .reply({ content: `❌ No pude crear el canal: ${e.message}`, ephemeral: true })
             .catch(() => {});
         }
+      }
+      return;
+    }
+
+    // ---------- /crear-categoria ----------
+    if (interaction.isChatInputCommand() && interaction.commandName === "crear-categoria") {
+      const nombre = interaction.options.getString("nombre").trim();
+      await interaction.deferReply({ ephemeral: true });
+
+      try {
+        const categoria = await interaction.guild.channels.create({
+          name: nombre,
+          type: ChannelType.GuildCategory,
+        });
+        await interaction.editReply(`✅ Categoría creada: **${categoria.name}**`);
+      } catch (e) {
+        console.error("Error en /crear-categoria:", e);
+        await interaction.editReply(
+          `❌ No pude crear la categoría. Revisa que el bot tenga el permiso 'Gestionar canales'. (${e.message})`
+        );
+      }
+      return;
+    }
+
+    // ---------- /crear-canal ----------
+    if (interaction.isChatInputCommand() && interaction.commandName === "crear-canal") {
+      const nombre = interaction.options.getString("nombre")?.trim();
+      const tipo = interaction.options.getString("tipo") ?? "texto";
+      const nombreCategoria = interaction.options.getString("categoria")?.trim();
+
+      if (!nombre && !nombreCategoria) {
+        await interaction.reply({
+          content: "⚠️ Escribe al menos el nombre del canal o el nombre de la categoría.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      await interaction.deferReply({ ephemeral: true });
+
+      try {
+        let categoria = null;
+        let categoriaCreada = false;
+
+        if (nombreCategoria) {
+          await interaction.guild.channels.fetch().catch(() => {});
+          categoria =
+            interaction.guild.channels.cache.find(
+              (c) =>
+                c.type === ChannelType.GuildCategory &&
+                normalizarTexto(c.name) === normalizarTexto(nombreCategoria)
+            ) ?? null;
+
+          if (!categoria) {
+            categoria = await interaction.guild.channels.create({
+              name: nombreCategoria,
+              type: ChannelType.GuildCategory,
+            });
+            categoriaCreada = true;
+          }
+        }
+
+        if (!nombre) {
+          await interaction.editReply(
+            categoriaCreada
+              ? `✅ Categoría creada: **${categoria.name}**`
+              : `ℹ️ La categoría **${categoria.name}** ya existía.`
+          );
+          return;
+        }
+
+        const canal = await interaction.guild.channels.create({
+          name: nombre,
+          type: tipo === "voz" ? ChannelType.GuildVoice : ChannelType.GuildText,
+          parent: categoria ? categoria.id : undefined,
+        });
+
+        await interaction.editReply(
+          `✅ Canal ${tipo === "voz" ? "de voz" : "de texto"} creado: <#${canal.id}>` +
+            (categoria
+              ? ` en **${categoria.name}**${categoriaCreada ? " (la categoría no existía, la creé)" : ""}`
+              : "")
+        );
+      } catch (e) {
+        console.error("Error en /crear-canal:", e);
+        await interaction.editReply(
+          `❌ No pude crear el canal. Revisa que el bot tenga el permiso 'Gestionar canales'. (${e.message})`
+        );
       }
       return;
     }
