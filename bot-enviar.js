@@ -247,7 +247,9 @@ function esCanalDeTicket(canal) {
 // ⚠️ Revisa que este ID sea el de un ROL real de tu servidor
 const ROL_SERVICIO_ID = "1441645993627095164";
 const CANAL_LOGS_SERVICIO_ID = ""; // opcional: pon aquí el ID de un canal de texto para registrar entradas/salidas. Déjalo vacío ("") si no quieres logs.
-const ARCHIVO_SERVICIOS = "./servicios_activos.json";
+const ARCHIVO_SERVICIOS = process.env.RAILWAY_VOLUME_MOUNT_PATH
+  ? `${process.env.RAILWAY_VOLUME_MOUNT_PATH}/servicios_activos.json`
+  : "./servicios_activos.json";
 
 // key = `${guildId}:${userId}`
 const serviciosActivos = new Map();
@@ -306,6 +308,7 @@ async function iniciarServicio(interaction, minutos) {
   programarFinServicio(key, fin - inicio);
 
   await logServicio(interaction.guild, `🟢 <@${userId}> **entró** a servicio por **${minutos} minuto(s)**. Termina <t:${Math.floor(fin / 1000)}:R>.`);
+  pedirActualizacionRanking(interaction.guild);
 
   return entrada;
 }
@@ -328,6 +331,10 @@ async function finalizarServicio(key, motivo) {
   if (!guild) return;
 
   const member = await guild.members.fetch(userId).catch(() => null);
+
+  // Guarda el tiempo real que duró el servicio (para el ranking de horas)
+  sumarHoras(userId, member?.displayName, entrada, motivo === "manual" ? Date.now() : entrada.fin);
+
   if (member) {
     await member.roles.remove(ROL_SERVICIO_ID).catch((e) => {
       console.error("No se pudo quitar el rol de servicio:", e);
@@ -340,6 +347,7 @@ async function finalizarServicio(key, motivo) {
       : `⏰ Se cumplió el tiempo de servicio de <@${userId}>, el rol fue removido.`;
 
   await logServicio(guild, texto);
+  pedirActualizacionRanking(guild);
 }
 
 async function logServicio(guild, texto) {
@@ -349,6 +357,146 @@ async function logServicio(guild, texto) {
 
   const embed = new EmbedBuilder().setDescription(texto).setColor(0x57f287).setTimestamp();
   await canal.send({ embeds: [embed] }).catch(() => {});
+}
+
+// ================== RANKING DE HORAS EN SERVICIO ==================
+const CANAL_RANKING_HORAS_ID = "1554346422508195871";
+const ARCHIVO_HORAS = process.env.RAILWAY_VOLUME_MOUNT_PATH
+  ? `${process.env.RAILWAY_VOLUME_MOUNT_PATH}/horas_servicio.json`
+  : "./horas_servicio.json";
+
+let datosHoras = { mensajeId: null, semanaInicio: 0, usuarios: {} };
+
+function cargarHoras() {
+  try {
+    if (!fs.existsSync(ARCHIVO_HORAS)) return;
+    const data = JSON.parse(fs.readFileSync(ARCHIVO_HORAS, "utf8"));
+    datosHoras = {
+      mensajeId: data.mensajeId ?? null,
+      semanaInicio: data.semanaInicio ?? 0,
+      usuarios: data.usuarios ?? {},
+    };
+  } catch (e) {
+    console.error("Error al cargar horas_servicio.json:", e);
+  }
+}
+
+function guardarHoras() {
+  try {
+    fs.writeFileSync(ARCHIVO_HORAS, JSON.stringify(datosHoras, null, 2));
+  } catch (e) {
+    console.error("Error al guardar horas_servicio.json:", e);
+  }
+}
+
+// Último sábado a las 22:00 (hora de República Dominicana, UTC-4)
+function inicioSemanaActual() {
+  const OFFSET = 4 * 60 * 60 * 1000;
+  const d = new Date(Date.now() - OFFSET);
+  const diff = (d.getUTCDay() - 6 + 7) % 7;
+  let inicio = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - diff, 22, 0, 0);
+  if (inicio > d.getTime()) inicio -= 7 * 24 * 60 * 60 * 1000;
+  return inicio + OFFSET;
+}
+
+// Si empezó una semana nueva, reinicia el ranking
+function revisarSemana() {
+  const actual = inicioSemanaActual();
+  if (datosHoras.semanaInicio !== actual) {
+    datosHoras.semanaInicio = actual;
+    datosHoras.usuarios = {};
+    guardarHoras();
+  }
+}
+
+function sumarHoras(userId, nombre, entrada, finReal) {
+  revisarSemana();
+  const desde = Math.max(entrada.inicio, datosHoras.semanaInicio);
+  const ms = Math.max(0, finReal - desde);
+  const previo = datosHoras.usuarios[userId] ?? { nombre: nombre ?? null, ms: 0 };
+  previo.nombre = nombre ?? previo.nombre;
+  previo.ms += ms;
+  datosHoras.usuarios[userId] = previo;
+  guardarHoras();
+}
+
+function formatoDuracion(ms) {
+  const totalMin = Math.floor(ms / 60000);
+  if (ms > 0 && totalMin < 1) return "1m";
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h === 0) return `${m}m`;
+  return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
+
+function crearEmbedRanking(guild) {
+  revisarSemana();
+  const mapa = new Map();
+
+  for (const [id, u] of Object.entries(datosHoras.usuarios)) {
+    mapa.set(id, { nombre: u.nombre ?? `<@${id}>`, ms: u.ms });
+  }
+
+  // Suma también a quienes están en servicio ahora mismo
+  const ahora = Date.now();
+  for (const e of serviciosActivos.values()) {
+    if (e.guildId !== guild.id) continue;
+    const desde = Math.max(e.inicio, datosHoras.semanaInicio);
+    const extra = Math.max(0, Math.min(ahora, e.fin) - desde);
+    const actual = mapa.get(e.userId) ?? { nombre: `<@${e.userId}>`, ms: 0 };
+    actual.ms += extra;
+    mapa.set(e.userId, actual);
+  }
+
+  const lista = [...mapa.values()].filter((x) => x.ms > 0).sort((a, b) => b.ms - a.ms).slice(0, 15);
+  const medallas = ["🥇", "🥈", "🥉"];
+  const lineas = lista.map((x, i) => `${medallas[i] ?? `**${i + 1}.**`} ${x.nombre} — ${formatoDuracion(x.ms)}`);
+
+  return new EmbedBuilder()
+    .setColor(0x57f287)
+    .setTitle(`⏱️ Ranking de Horas en Servicio — ${guild.name}`)
+    .setThumbnail(guild.iconURL({ size: 256 }) || null)
+    .setDescription(lineas.length ? lineas.join("\n") : "Nadie ha entrado en servicio esta semana.")
+    .setFooter({
+      text: `Semana desde: ${new Date(datosHoras.semanaInicio).toLocaleString("es-DO", {
+        timeZone: "America/Santo_Domingo",
+      })} — se reinicia los sábados 22:00`,
+      iconURL: guild.iconURL() || undefined,
+    })
+    .setTimestamp();
+}
+
+async function actualizarRanking(guild) {
+  const canal = await guild.channels.fetch(CANAL_RANKING_HORAS_ID).catch(() => null);
+  if (!canal || !canal.isTextBased()) {
+    console.error("No encuentro el canal del ranking de horas.");
+    return;
+  }
+
+  const embed = crearEmbedRanking(guild);
+  let mensaje = null;
+  if (datosHoras.mensajeId) {
+    mensaje = await canal.messages.fetch(datosHoras.mensajeId).catch(() => null);
+  }
+
+  if (mensaje) {
+    await mensaje.edit({ embeds: [embed] }).catch((e) => console.error("Error al editar el ranking:", e));
+  } else {
+    const nuevo = await canal.send({ embeds: [embed] }).catch((e) => {
+      console.error("Error al enviar el ranking:", e);
+      return null;
+    });
+    if (nuevo) {
+      datosHoras.mensajeId = nuevo.id;
+      guardarHoras();
+    }
+  }
+}
+
+// Cola para que las actualizaciones no se pisen entre sí
+let colaRanking = Promise.resolve();
+function pedirActualizacionRanking(guild) {
+  colaRanking = colaRanking.then(() => actualizarRanking(guild)).catch(() => {});
 }
 
 // ================== SISTEMA DE FICHAJES ==================
@@ -1189,6 +1337,18 @@ client.once("ready", async () => {
     } else {
       programarFinServicio(key, restante);
     }
+  }
+
+  // Ranking de horas en servicio: carga, reinicio semanal y actualización cada 5 minutos
+  cargarHoras();
+  revisarSemana();
+  const guildRanking = await client.guilds.fetch(GUILD_ID).catch(() => null);
+  if (guildRanking) {
+    pedirActualizacionRanking(guildRanking);
+    setInterval(() => {
+      revisarSemana();
+      pedirActualizacionRanking(guildRanking);
+    }, 5 * 60 * 1000);
   }
 });
 

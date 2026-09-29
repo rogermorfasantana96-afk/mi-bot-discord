@@ -1,4 +1,6 @@
-﻿node_modules
+﻿node_modules/
 .env
 facturas.json
+verificaciones.json
 servicios_activos.json
+horas_servicio.json
