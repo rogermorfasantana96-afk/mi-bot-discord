@@ -464,7 +464,7 @@ function permisosPrivados(guild, usuarioIds = []) {
   ];
 }
 
-// Solo el staff (los roles de arriba) o un administrador puede crear fichajes
+// Solo el staff (los roles de arriba) o un administrador puede crear y cerrar fichajes
 function puedeCrearFichajes(member) {
   return (
     member.permissions.has(PermissionFlagsBits.Administrator) ||
@@ -1063,9 +1063,19 @@ client.on("interactionCreate", async (interaction) => {
           permissionOverwrites: permisosPrivados(guild, [userId]),
         });
 
+        // Botón para cerrar (borrar) el canal completo
+        const botonCerrar = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId("cerrar_fichaje_btn")
+            .setLabel("Cerrar fichaje")
+            .setEmoji("🔒")
+            .setStyle(ButtonStyle.Danger)
+        );
+
         await canal.send({
           content: "@everyone",
           embeds: [crearEmbedFormatoFichajes(guild)],
+          components: [botonCerrar],
           allowedMentions: { parse: ["everyone"] },
         });
 
@@ -1080,6 +1090,27 @@ client.on("interactionCreate", async (interaction) => {
             .catch(() => {});
         }
       }
+      return;
+    }
+
+    // ---------- Botón: Cerrar fichaje ----------
+    if (interaction.isButton() && interaction.customId === "cerrar_fichaje_btn") {
+      const canal = interaction.channel;
+
+      if (!canal.topic || !canal.topic.startsWith("fichaje:")) {
+        await interaction.reply({ content: "❌ Este botón solo funciona dentro de un canal de fichajes.", ephemeral: true });
+        return;
+      }
+
+      if (!puedeCrearFichajes(interaction.member)) {
+        await interaction.reply({ content: "❌ Solo el staff puede cerrar fichajes.", ephemeral: true });
+        return;
+      }
+
+      await interaction.reply("🔒 Cerrando este fichaje en 5 segundos...");
+      setTimeout(() => {
+        canal.delete(`Fichaje cerrado por ${interaction.user.tag}`).catch(() => {});
+      }, 5000);
       return;
     }
 
