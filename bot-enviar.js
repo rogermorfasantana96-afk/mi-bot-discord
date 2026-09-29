@@ -362,6 +362,75 @@ async function calcularTotalFichajes(canal, cantidad, usuario) {
   return total;
 }
 
+// ================== PANEL DE FICHAJES (DEMON RACING) ==================
+// Opcional: ID de la categoría donde se crean los canales de fichajes.
+// Si lo dejas vacío (""), el bot busca una categoría que se llame "Control de Personal".
+const CATEGORIA_FICHAJES_ID = "";
+
+function normalizarTexto(txt) {
+  return String(txt)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+// Convierte "Juan Pérez" en "juan-perez" para usarlo en el nombre del canal
+function limpiarParaCanal(txt) {
+  return normalizarTexto(txt)
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+async function buscarCategoriaFichajes(guild) {
+  await guild.channels.fetch().catch(() => {});
+  if (CATEGORIA_FICHAJES_ID) {
+    return guild.channels.cache.get(CATEGORIA_FICHAJES_ID) ?? null;
+  }
+  return (
+    guild.channels.cache.find(
+      (c) => c.type === ChannelType.GuildCategory && normalizarTexto(c.name).includes("control de personal")
+    ) ?? null
+  );
+}
+
+function crearEmbedFormatoFichajes(guild) {
+  return new EmbedBuilder()
+    .setColor(0xed4245)
+    .setTitle("📋 Formato de fichajes – Demon Racing")
+    .setDescription(
+      "**Ejemplo:**\n" +
+        "```\n" +
+        "Cliente: ID: 25366\n" +
+        "Servicio: Reparación\n" +
+        "Tipo: Carro\n" +
+        "Total: 1,500\n\n" +
+        "Cliente: ID: 25366\n" +
+        "Servicio: Reparación de gomas\n" +
+        "Tipo: Carro (VIP)\n" +
+        "Total: 10,000\n\n" +
+        "Cliente: ID: 25366\n" +
+        "Servicio: Reparación de gomas\n" +
+        "Tipo: Moto (VIP)\n" +
+        "Total: 10,000\n\n" +
+        "Cliente: ID: 25366\n" +
+        "Servicio: Reparación\n" +
+        "Tipo: Moto\n" +
+        "Total: 1,000\n" +
+        "```\n" +
+        "📌 **Formato a usar a partir de hoy:**\n" +
+        "```\n" +
+        "Cliente: ID:\n" +
+        "Servicio:\n" +
+        "Tipo:\n" +
+        "Total:\n" +
+        "```"
+    )
+    .setFooter({ text: "Demon Racing • Fichajes", iconURL: guild.iconURL() || undefined })
+    .setTimestamp();
+}
+
 // ================== COMANDOS SLASH ==================
 const comandos = [
   new SlashCommandBuilder()
@@ -419,6 +488,11 @@ const comandos = [
         .setRequired(true)
         .setMinValue(0)
     ),
+
+  new SlashCommandBuilder()
+    .setName("panel-fichajes")
+    .setDescription("Publica el panel para crear canales de fichajes")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
 ].map((c) => c.toJSON());
 
 async function registrarComandos() {
@@ -772,6 +846,136 @@ client.on("interactionCreate", async (interaction) => {
         .setColor(0xed4245);
 
       await interaction.reply({ embeds: [embedAdd] });
+      return;
+    }
+
+    // ---------- /panel-fichajes ----------
+    if (interaction.isChatInputCommand() && interaction.commandName === "panel-fichajes") {
+      const embed = new EmbedBuilder()
+        .setColor(0xed4245)
+        .setTitle("🛠️ Fichajes — Demon Racing")
+        .setThumbnail(interaction.guild.iconURL({ size: 256 }) || null)
+        .setDescription(
+          "Presiona **Crear fichaje** para abrir tu canal de fichajes.\n\n" +
+            "📝 Te vamos a pedir tu **nombre** y tu **ID**.\n" +
+            "📋 Cuando se cree el canal, ahí mismo se envía el formato que debes usar.\n\n" +
+            "⚠️ Solo puedes tener **un canal de fichajes** a la vez."
+        )
+        .setFooter({ text: "Demon Racing • Fichajes", iconURL: interaction.guild.iconURL() || undefined })
+        .setTimestamp();
+
+      const boton = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId("crear_fichaje_btn")
+          .setLabel("Crear fichaje")
+          .setEmoji("📋")
+          .setStyle(ButtonStyle.Danger)
+      );
+
+      await interaction.reply({ embeds: [embed], components: [boton] });
+      return;
+    }
+
+    // ---------- Botón: Crear fichaje ----------
+    if (interaction.isButton() && interaction.customId === "crear_fichaje_btn") {
+      const yaExiste = interaction.guild.channels.cache.find(
+        (c) => c.topic === `fichaje:${interaction.user.id}`
+      );
+      if (yaExiste) {
+        await interaction.reply({
+          content: `⚠️ Ya tienes un canal de fichajes: <#${yaExiste.id}>`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const modal = new ModalBuilder()
+        .setCustomId("modal_crear_fichaje")
+        .setTitle("Crear fichaje");
+
+      const inputNombre = new TextInputBuilder()
+        .setCustomId("input_nombre_fichaje")
+        .setLabel("Nombre (ej: Santana)")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(40);
+
+      const inputId = new TextInputBuilder()
+        .setCustomId("input_id_fichaje")
+        .setLabel("Tu ID")
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder("Ej: 25366")
+        .setRequired(true)
+        .setMaxLength(15);
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(inputNombre),
+        new ActionRowBuilder().addComponents(inputId)
+      );
+
+      await interaction.showModal(modal);
+      return;
+    }
+
+    // ---------- Modal: Crear fichaje enviado ----------
+    if (interaction.isModalSubmit() && interaction.customId === "modal_crear_fichaje") {
+      try {
+        const guild = interaction.guild;
+        const nombre = interaction.fields.getTextInputValue("input_nombre_fichaje").trim();
+        const idJugador = interaction.fields.getTextInputValue("input_id_fichaje").trim();
+
+        await interaction.deferReply({ ephemeral: true });
+
+        const yaExiste = guild.channels.cache.find((c) => c.topic === `fichaje:${interaction.user.id}`);
+        if (yaExiste) {
+          await interaction.editReply({ content: `⚠️ Ya tienes un canal de fichajes: <#${yaExiste.id}>` });
+          return;
+        }
+
+        const categoria = await buscarCategoriaFichajes(guild);
+        if (!categoria) {
+          await interaction.editReply({
+            content:
+              '❌ No encuentro la categoría "Control de Personal". Ponle ese nombre a la categoría o escribe su ID en `CATEGORIA_FICHAJES_ID` en el código.',
+          });
+          return;
+        }
+
+        const nombreCanal = `fichaje-dr-${limpiarParaCanal(nombre) || "sin-nombre"}-id-${
+          limpiarParaCanal(idJugador) || "0"
+        }`.slice(0, 100);
+
+        const canal = await guild.channels.create({
+          name: nombreCanal,
+          type: ChannelType.GuildText,
+          parent: categoria.id,
+          topic: `fichaje:${interaction.user.id}`,
+        });
+
+        // Le damos acceso a quien lo creó (además de lo que ya tenga la categoría)
+        await canal.permissionOverwrites.edit(interaction.user.id, {
+          ViewChannel: true,
+          SendMessages: true,
+          ReadMessageHistory: true,
+        });
+
+        await canal.send({
+          content: "@everyone",
+          embeds: [crearEmbedFormatoFichajes(guild)],
+          allowedMentions: { parse: ["everyone"] },
+        });
+
+        await interaction.editReply({ content: `✅ Tu canal de fichajes fue creado: <#${canal.id}>` });
+      } catch (e) {
+        console.error("Error al crear el fichaje:", e);
+        if (interaction.deferred) {
+          await interaction.editReply({ content: `❌ No pude crear el canal: ${e.message}` }).catch(() => {});
+        } else if (interaction.isRepliable()) {
+          await interaction
+            .reply({ content: `❌ No pude crear el canal: ${e.message}`, ephemeral: true })
+            .catch(() => {});
+        }
+      }
       return;
     }
 
