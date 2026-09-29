@@ -603,6 +603,417 @@ function pedirActualizacionTabla(guild) {
   colaTabla = colaTabla.then(() => actualizarTablaFacturas(guild)).catch(() => {});
 }
 
+// ================== SISTEMA DE VERIFICACIÓN (NOMBRE + ID) ==================
+// Roles que recibe la persona al verificarse
+const ROLES_VERIFICADOS_IDS = ["1441645763716448276", "1442275631793700985"];
+// Rol "sin verificar" que se quita al verificarse (opcional, déjalo "" si no tienes)
+const ROL_SIN_VERIFICAR_ID = "";
+// Canal donde el bot avisa verificaciones e intentos de ID repetido (opcional, "" = sin logs)
+const CANAL_LOGS_VERIFICACION_ID = "";
+
+const ARCHIVO_VERIFICACIONES = process.env.RAILWAY_VOLUME_MOUNT_PATH
+  ? `${process.env.RAILWAY_VOLUME_MOUNT_PATH}/verificaciones.json`
+  : "./verificaciones.json";
+
+const COLOR_PRINCIPAL = 0xed4245;
+const COLOR_OK = 0x57f287;
+const COLOR_AVISO = 0xfee75c;
+
+// verificados: { "25366": { userId, nombre, fecha, origen } }
+let datosVerif = { verificados: {} };
+
+function cargarVerificaciones() {
+  try {
+    if (!fs.existsSync(ARCHIVO_VERIFICACIONES)) return;
+    const data = JSON.parse(fs.readFileSync(ARCHIVO_VERIFICACIONES, "utf8"));
+    datosVerif = { verificados: data.verificados ?? {} };
+  } catch (e) {
+    console.error("Error al cargar verificaciones.json:", e);
+  }
+}
+
+function guardarVerificaciones() {
+  try {
+    fs.writeFileSync(ARCHIVO_VERIFICACIONES, JSON.stringify(datosVerif, null, 2));
+  } catch (e) {
+    console.error("Error al guardar verificaciones.json:", e);
+  }
+}
+
+function buscarPorUsuario(userId) {
+  const entrada = Object.entries(datosVerif.verificados).find(([, v]) => v.userId === userId);
+  return entrada ? { id: entrada[0], ...entrada[1] } : null;
+}
+
+function esStaffVerif(member) {
+  return (
+    member.permissions.has(PermissionFlagsBits.Administrator) ||
+    member.permissions.has(PermissionFlagsBits.ManageRoles)
+  );
+}
+
+function limpiarId(txt) {
+  return String(txt).replace(/\s+/g, "");
+}
+
+function idValido(id) {
+  return /^\d{1,10}$/.test(id);
+}
+
+// Saca el ID de un apodo tipo "Santana | 25366" o "Santana 25366"
+function extraerIdDeApodo(apodo) {
+  const numeros = String(apodo).match(/\d{3,10}/g);
+  return numeros ? numeros[numeros.length - 1] : null;
+}
+
+function recortarLista(lineas, max = 1000) {
+  let texto = "";
+  let mostrados = 0;
+  for (const l of lineas) {
+    if ((texto + l + "\n").length > max) break;
+    texto += l + "\n";
+    mostrados++;
+  }
+  const faltan = lineas.length - mostrados;
+  if (faltan > 0) texto += `… y ${faltan} más`;
+  return texto.trim() || "—";
+}
+
+async function logVerificacion(guild, embed) {
+  if (!CANAL_LOGS_VERIFICACION_ID) return;
+  const canal = await guild.channels.fetch(CANAL_LOGS_VERIFICACION_ID).catch(() => null);
+  if (!canal || !canal.isTextBased()) return;
+  await canal.send({ embeds: [embed] }).catch(() => {});
+}
+
+function crearEmbedPanelVerificacion(guild) {
+  return new EmbedBuilder()
+    .setColor(COLOR_PRINCIPAL)
+    .setTitle("✅ Verificación — Demon Racing")
+    .setThumbnail(guild.iconURL({ size: 256 }) || null)
+    .setDescription(
+      "Para acceder al servidor debes verificarte con tu **nombre** y tu **ID**.\n\n" +
+        "**📋 Cómo hacerlo**\n" +
+        "1️⃣ Presiona el botón **Verificarme**.\n" +
+        "2️⃣ Escribe tu nombre y tu ID.\n" +
+        "3️⃣ Recibirás tu rol y tu apodo automáticamente.\n\n" +
+        "**⚠️ Importante**\n" +
+        "• Cada **ID es único**: si ya está registrado por otra persona, no podrás usarlo.\n" +
+        "• Escribe tus datos correctamente, no se pueden repetir.\n" +
+        "• Si tienes un problema, abre un ticket con el staff."
+    )
+    .setFooter({ text: "Demon Racing • Verificación", iconURL: guild.iconURL() || undefined })
+    .setTimestamp();
+}
+
+// Devuelve true si la interacción era de verificación (ya se atendió)
+async function manejarVerificacion(interaction) {
+  // ---------- /panel-verificacion ----------
+  if (interaction.isChatInputCommand() && interaction.commandName === "panel-verificacion") {
+    if (!esStaffVerif(interaction.member)) {
+      await interaction.reply({ content: "❌ Solo el staff puede publicar este panel.", ephemeral: true });
+      return true;
+    }
+
+    for (const rolId of ROLES_VERIFICADOS_IDS) {
+      const rol = await interaction.guild.roles.fetch(rolId).catch(() => null);
+      if (!rol) {
+        await interaction.reply({
+          content: `❌ No encuentro el rol de verificación (ID: \`${rolId}\`). Revisa \`ROLES_VERIFICADOS_IDS\` en el código.`,
+          ephemeral: true,
+        });
+        return true;
+      }
+      if (rol.position >= interaction.guild.members.me.roles.highest.position) {
+        await interaction.reply({
+          content: `❌ Mi rol está por debajo de "${rol.name}". Sube mi rol por encima en Ajustes del servidor → Roles.`,
+          ephemeral: true,
+        });
+        return true;
+      }
+    }
+
+    const boton = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("verificarme_btn")
+        .setLabel("Verificarme")
+        .setEmoji("✅")
+        .setStyle(ButtonStyle.Success)
+    );
+
+    await interaction.reply({ embeds: [crearEmbedPanelVerificacion(interaction.guild)], components: [boton] });
+    return true;
+  }
+
+  // ---------- Botón: Verificarme ----------
+  if (interaction.isButton() && interaction.customId === "verificarme_btn") {
+    const registro = buscarPorUsuario(interaction.user.id);
+    if (registro) {
+      await interaction.reply({
+        content: `✅ Ya estás verificado como **${registro.nombre}** (ID: \`${registro.id}\`).`,
+        ephemeral: true,
+      });
+      return true;
+    }
+
+    const modal = new ModalBuilder().setCustomId("modal_verificacion").setTitle("Verificación");
+
+    const inputNombre = new TextInputBuilder()
+      .setCustomId("input_nombre_verif")
+      .setLabel("Nombre (ej: Santana)")
+      .setStyle(TextInputStyle.Short)
+      .setMinLength(2)
+      .setMaxLength(20)
+      .setRequired(true);
+
+    const inputId = new TextInputBuilder()
+      .setCustomId("input_id_verif")
+      .setLabel("ID (ej: 25366)")
+      .setStyle(TextInputStyle.Short)
+      .setMaxLength(10)
+      .setRequired(true);
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(inputNombre),
+      new ActionRowBuilder().addComponents(inputId)
+    );
+
+    await interaction.showModal(modal);
+    return true;
+  }
+
+  // ---------- Modal enviado ----------
+  if (interaction.isModalSubmit() && interaction.customId === "modal_verificacion") {
+    await interaction.deferReply({ ephemeral: true });
+
+    const guild = interaction.guild;
+    const userId = interaction.user.id;
+    const nombre = interaction.fields.getTextInputValue("input_nombre_verif").trim().replace(/\s+/g, " ");
+    const id = limpiarId(interaction.fields.getTextInputValue("input_id_verif"));
+
+    // 1) Formato del ID
+    if (!idValido(id)) {
+      await interaction.editReply({ content: "❌ El ID solo puede tener **números** (máximo 10 dígitos)." });
+      return true;
+    }
+
+    // 2) La persona ya está verificada
+    const propio = buscarPorUsuario(userId);
+    if (propio) {
+      await interaction.editReply({
+        content: `✅ Ya estás verificado como **${propio.nombre}** (ID: \`${propio.id}\`).`,
+      });
+      return true;
+    }
+
+    // 3) ID repetido → bloquear
+    const existente = datosVerif.verificados[id];
+    if (existente && existente.userId !== userId) {
+      await interaction.editReply({
+        content:
+          `🚫 El ID \`${id}\` **ya está registrado por otra persona**.\n` +
+          "Si es tuyo y crees que es un error, abre un ticket con el staff.",
+      });
+
+      await logVerificacion(
+        guild,
+        new EmbedBuilder()
+          .setColor(COLOR_AVISO)
+          .setTitle("⚠️ Intento de ID repetido")
+          .setDescription(
+            `<@${userId}> intentó verificarse con el ID \`${id}\`, que ya pertenece a <@${existente.userId}> (**${existente.nombre}**).`
+          )
+          .setTimestamp()
+      );
+      return true;
+    }
+
+    // 4) Registrar
+    datosVerif.verificados[id] = { userId, nombre, fecha: Date.now(), origen: "bot" };
+    guardarVerificaciones();
+
+    // 5) Roles + apodo
+    const member = await guild.members.fetch(userId).catch(() => null);
+    let avisoExtra = "";
+    if (member) {
+      try {
+        await member.roles.add(ROLES_VERIFICADOS_IDS);
+        if (ROL_SIN_VERIFICAR_ID) await member.roles.remove(ROL_SIN_VERIFICAR_ID).catch(() => {});
+      } catch (e) {
+        console.error("No se pudo asignar el rol verificado:", e);
+        avisoExtra += "\n⚠️ No pude darte el rol, avisa al staff.";
+      }
+      await member.setNickname(`${nombre} | ${id}`.slice(0, 32), "Verificación").catch(() => {
+        avisoExtra += "\nℹ️ No pude cambiarte el apodo (probablemente por jerarquía de roles).";
+      });
+    }
+
+    const embedOk = new EmbedBuilder()
+      .setColor(COLOR_OK)
+      .setTitle("✅ ¡Verificación completada!")
+      .addFields(
+        { name: "Nombre", value: `**${nombre}**`, inline: true },
+        { name: "ID", value: `**${id}**`, inline: true }
+      )
+      .setDescription("Ya tienes acceso al servidor. ¡Bienvenido a **Demon Racing**! 🏁" + avisoExtra)
+      .setTimestamp();
+
+    await interaction.editReply({ embeds: [embedOk] });
+
+    await logVerificacion(
+      guild,
+      new EmbedBuilder()
+        .setColor(COLOR_OK)
+        .setTitle("🟢 Nueva verificación")
+        .setDescription(`<@${userId}> se verificó como **${nombre}** con el ID \`${id}\`.`)
+        .setTimestamp()
+    );
+    return true;
+  }
+
+  // ---------- /sincronizar-verificados ----------
+  if (interaction.isChatInputCommand() && interaction.commandName === "sincronizar-verificados") {
+    if (!esStaffVerif(interaction.member)) {
+      await interaction.reply({ content: "❌ Solo el staff puede usar este comando.", ephemeral: true });
+      return true;
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+
+    try {
+      const miembros = await interaction.guild.members.fetch();
+
+      const registrados = [];
+      const pendientes = [];
+      const duplicados = [];
+      let yaEnBot = 0;
+      let sinVerificar = 0;
+
+      for (const m of miembros.values()) {
+        if (m.user.bot) continue;
+
+        if (!ROLES_VERIFICADOS_IDS.some((r) => m.roles.cache.has(r))) {
+          sinVerificar++;
+          continue;
+        }
+
+        if (buscarPorUsuario(m.id)) {
+          yaEnBot++;
+          continue;
+        }
+
+        const id = extraerIdDeApodo(m.displayName);
+        if (!id) {
+          pendientes.push(`<@${m.id}>`);
+          continue;
+        }
+
+        if (datosVerif.verificados[id]) {
+          duplicados.push(`<@${m.id}> → ID \`${id}\` (ya es de <@${datosVerif.verificados[id].userId}>)`);
+          continue;
+        }
+
+        const nombre = m.displayName.replace(/[|\d]/g, "").trim().slice(0, 20) || m.user.username;
+        datosVerif.verificados[id] = { userId: m.id, nombre, fecha: Date.now(), origen: "sincronizado" };
+        registrados.push(`<@${m.id}> → **${nombre}** (\`${id}\`)`);
+      }
+
+      guardarVerificaciones();
+
+      const embed = new EmbedBuilder()
+        .setColor(COLOR_PRINCIPAL)
+        .setTitle("🔄 Sincronización de verificados")
+        .setDescription(
+          "El bot revisó a los miembros con algún rol de verificación que aún no estaban en su base de datos.\n" +
+            "El ID se toma del **apodo** (ej: `Santana | 25366`)."
+        )
+        .addFields(
+          { name: `✅ Reconocidos ahora (${registrados.length})`, value: recortarLista(registrados) },
+          {
+            name: `❓ Con rol pero sin ID en el apodo (${pendientes.length})`,
+            value:
+              recortarLista(pendientes) +
+              (pendientes.length ? "\n*Pueden usar el botón de verificación para registrar su ID.*" : ""),
+          },
+          { name: `🚫 ID repetido (${duplicados.length})`, value: recortarLista(duplicados) },
+          { name: "📊 Resumen", value: `Ya registrados: **${yaEnBot}**\nSin verificar (sin rol): **${sinVerificar}**` }
+        )
+        .setFooter({ text: "Demon Racing • Verificación" })
+        .setTimestamp();
+
+      await interaction.editReply({ embeds: [embed] });
+    } catch (e) {
+      console.error("Error en /sincronizar-verificados:", e);
+      await interaction.editReply({
+        content: `❌ No pude sincronizar. Revisa que el bot tenga el intent de **Server Members** activado. (${e.message})`,
+      });
+    }
+    return true;
+  }
+
+  // ---------- /desverificar ----------
+  if (interaction.isChatInputCommand() && interaction.commandName === "desverificar") {
+    if (!esStaffVerif(interaction.member)) {
+      await interaction.reply({ content: "❌ Solo el staff puede usar este comando.", ephemeral: true });
+      return true;
+    }
+
+    const usuario = interaction.options.getUser("usuario");
+    const registro = buscarPorUsuario(usuario.id);
+    if (!registro) {
+      await interaction.reply({ content: `⚠️ <@${usuario.id}> no está registrado en el bot.`, ephemeral: true });
+      return true;
+    }
+
+    delete datosVerif.verificados[registro.id];
+    guardarVerificaciones();
+
+    const member = await interaction.guild.members.fetch(usuario.id).catch(() => null);
+    if (member) {
+      await member.roles.remove(ROLES_VERIFICADOS_IDS).catch(() => {});
+      if (ROL_SIN_VERIFICAR_ID) await member.roles.add(ROL_SIN_VERIFICAR_ID).catch(() => {});
+    }
+
+    await interaction.reply({
+      content: `🧹 <@${usuario.id}> fue desverificado. El ID \`${registro.id}\` quedó libre.`,
+      ephemeral: true,
+    });
+    return true;
+  }
+
+  // ---------- /buscar-id ----------
+  if (interaction.isChatInputCommand() && interaction.commandName === "buscar-id") {
+    if (!esStaffVerif(interaction.member)) {
+      await interaction.reply({ content: "❌ Solo el staff puede usar este comando.", ephemeral: true });
+      return true;
+    }
+
+    const id = limpiarId(interaction.options.getString("id"));
+    const registro = datosVerif.verificados[id];
+    if (!registro) {
+      await interaction.reply({ content: `🔎 El ID \`${id}\` **no está registrado**.`, ephemeral: true });
+      return true;
+    }
+
+    const embed = new EmbedBuilder()
+      .setColor(COLOR_PRINCIPAL)
+      .setTitle("🔎 ID encontrado")
+      .addFields(
+        { name: "ID", value: `**${id}**`, inline: true },
+        { name: "Nombre", value: `**${registro.nombre}**`, inline: true },
+        { name: "Persona", value: `<@${registro.userId}>`, inline: true },
+        { name: "Registrado", value: `<t:${Math.floor(registro.fecha / 1000)}:R>`, inline: true },
+        { name: "Origen", value: registro.origen === "bot" ? "Verificó con el bot" : "Sincronizado", inline: true }
+      )
+      .setTimestamp();
+
+    await interaction.reply({ embeds: [embed], ephemeral: true });
+    return true;
+  }
+
+  return false;
+}
+
 // ================== COMANDOS SLASH ==================
 const comandos = [
   new SlashCommandBuilder()
@@ -725,6 +1136,29 @@ const comandos = [
         .setRequired(true)
         .setMinValue(0)
     ),
+
+  // ---- Verificación ----
+  new SlashCommandBuilder()
+    .setName("panel-verificacion")
+    .setDescription("Publica el panel de verificación en este canal")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
+
+  new SlashCommandBuilder()
+    .setName("sincronizar-verificados")
+    .setDescription("Reconoce a los miembros que ya tienen el rol verificado pero no pasaron por el bot")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
+
+  new SlashCommandBuilder()
+    .setName("desverificar")
+    .setDescription("Libera el ID de una persona para que pueda verificarse de nuevo")
+    .addUserOption((op) => op.setName("usuario").setDescription("Persona a desverificar").setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
+
+  new SlashCommandBuilder()
+    .setName("buscar-id")
+    .setDescription("Busca quién tiene registrado un ID")
+    .addStringOption((op) => op.setName("id").setDescription("ID a buscar").setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
 ].map((c) => c.toJSON());
 
 async function registrarComandos() {
@@ -741,6 +1175,7 @@ client.once("ready", async () => {
 
   // Cargar la tabla de facturas y publicarla/actualizarla al encender
   cargarFacturas();
+  cargarVerificaciones();
   const guildTabla = await client.guilds.fetch(GUILD_ID).catch(() => null);
   if (guildTabla) pedirActualizacionTabla(guildTabla);
 
@@ -760,6 +1195,9 @@ client.once("ready", async () => {
 // ================== INTERACCIONES ==================
 client.on("interactionCreate", async (interaction) => {
   try {
+    // ---------- Verificación (nombre + ID) ----------
+    if (await manejarVerificacion(interaction)) return;
+
     // ---------- /panel-enviar ----------
     if (interaction.isChatInputCommand() && interaction.commandName === "panel-enviar") {
       const embed = new EmbedBuilder()
