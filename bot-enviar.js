@@ -40,6 +40,10 @@ const client = new Client({
   ],
 });
 
+// ================== POSTULACIONES ==================
+const postulaciones = require("./postulaciones");
+postulaciones.iniciar(client);
+
 // ================== FILTRO DE MALAS PALABRAS ==================
 const PALABRAS_PROHIBIDAS = [
   "mamaguevo",
@@ -98,6 +102,7 @@ function contieneMalaPalabra(texto) {
 client.on("messageCreate", async (mensaje) => {
   if (mensaje.author.bot) return;
   if (!mensaje.guild) return;
+  if (mensaje.channel.topic?.startsWith("postulacion:")) return;
 
   if (contieneMalaPalabra(mensaje.content)) {
     try {
@@ -1398,6 +1403,8 @@ const comandos = [
     .setDescription("Busca quién tiene registrado un ID")
     .addStringOption((op) => op.setName("id").setDescription("ID a buscar").setRequired(true))
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
+
+  ...postulaciones.comandos,
 ].map((c) => c.toJSON());
 
 async function registrarComandos() {
